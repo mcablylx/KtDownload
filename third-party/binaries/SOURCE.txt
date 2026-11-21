@@ -1,0 +1,39 @@
+Prebuilt native binaries for offline packaging
+==============================================
+
+This directory ships pinned, checksummed native binaries so that anyone can
+clone the repo and build an installer WITHOUT downloading FFmpeg or libvlc
+from the network. The packaging scripts restore these into the locations the
+build expects, verifying SHA-256 before use.
+
+Files
+-----
+
+1) ffmpeg-macos-universal  (5.4 MB, universal: x86_64 + arm64)
+   FFmpeg 8.1.3, LGPL-3.0-or-later (--enable-version3, no GPL/nonfree).
+   Built with the exact configure flags in scripts/fetch-ffmpeg-macos.sh,
+   x86_64 + arm64 slices merged with `lipo -create`.
+   SHA-256: ec49289086ee9334cd33f83c24bd51b6d3907761dc3f13e379927916ecb5aadb
+   Source tarball: https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+   Source SHA-256: 7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+   Used by: HLS (m3u8) remux to MP4, via external process (not linked).
+
+2) vlc-3.0.21.dmg  (81 MB, universal: x86_64 + arm64)
+   VideoLAN libvlc 3.0.21, LGPL-2.1-or-later.
+   Upstream: https://get.videolan.org/vlc/3.0.21/
+   SHA-256: 50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0
+   Used by: in-app media player (online playback), via vlcj dynamic loading.
+
+Upgrade policy
+--------------
+When bumping FFmpeg or libvlc versions, update the pinned version + SHA-256 in
+ALL of these places together:
+  - scripts/fetch-ffmpeg-macos.sh  (FFMPEG_VERSION, EXPECTED_SHA256, PREBUILT_SHA256)
+  - composeApp/build.gradle.kts    (vlcBundleVersion, bundledVlcSha256)
+  - this file
+  - THIRD-PARTY-NOTICES.md / resources/common/*/SOURCE.txt
+
+Windows / Linux
+---------------
+Only macOS binaries are bundled here. Windows and Linux packaging still fetch
+FFmpeg/libvlc from their pinned upstream sources on first build (SHA-verified).

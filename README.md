@@ -14,6 +14,7 @@
 - [鸣谢与上游代码关系](#鸣谢与上游代码关系)
 - [功能总览](#功能总览)
 - [快速开始](#快速开始)
+  - [离线打包（无需下载 FFmpeg / libvlc）](#离线打包无需下载-ffmpeg--libvlc)
 - [使用说明](#使用说明)
 - [配置项](#配置项)
 - [网络协议与端口](#网络协议与端口)
@@ -184,6 +185,25 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 
 Windows 打包 EXE / MSI 需安装 WiX Toolset 3。macOS 打包需在本机完成 FFmpeg 准备与 ad-hoc 签名。
 
+### 离线打包（无需下载 FFmpeg / libvlc）
+
+仓库的 `third-party/binaries/` 随附了**校验过 SHA-256 的预置二进制**（macOS 版 FFmpeg 为 universal，同时支持 Intel 与 Apple Silicon；libvlc 为 universal 3.0.21）。clone 后直接打包即可，全程不联网、不现场编译：
+
+```bash
+git clone <repo-url>
+cd KtDownload
+bash package-macos.sh
+```
+
+打包脚本会自动完成以下还原（都在校验 SHA-256 后进行）：
+
+- FFmpeg：从 `third-party/binaries/ffmpeg-macos-universal` 还原到 `resources/macos/ffmpeg/ffmpeg`
+- libvlc：从 `third-party/binaries/vlc-3.0.21.dmg` 还原到 `~/.gradle/vlcSetup/`，供 vlcSetup 插件解压使用
+
+预置文件缺失或损坏时，脚本会自动回退到原来的联网下载/源码编译路径（`--force` 可强制走源码编译）。因此网络良好的环境行为与之前完全一致。
+
+> Windows / Linux 目前仍需联网获取 FFmpeg 与 libvlc（版本已锁定并带 SHA 校验），仅 macOS 提供离线预置包。升级任一二进制版本时，必须同步更新 `third-party/binaries/SOURCE.txt` 中记录的版本与 SHA，以及脚本/构建文件中的对应常量。
+
 ---
 
 ## 使用说明
@@ -279,6 +299,7 @@ KtDownload/
 │       └── jvmTest/                 # JVM 单元测试与集成测试
 ├── resources/                       # 各平台 FFmpeg / libvlc 资源与许可
 ├── third-party/
+│   ├── binaries/                    # 离线打包用预置二进制（universal FFmpeg + libvlc，含 SOURCE.txt）
 │   ├── ffmpeg/                      # FFmpeg 版本与来源说明
 │   └── yunx-desktop/                # 上游 AGPL 许可与移植来源清单
 ├── scripts/                         # FFmpeg 获取与打包辅助脚本

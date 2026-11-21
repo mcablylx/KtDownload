@@ -11,10 +11,12 @@ LSOverride
 # IntelliJ IDEA / Android Studio：整个目录由本机 IDE 生成，不纳入版本控制
 .idea/
 
-# 各平台原生二进制：由 scripts/fetch-ffmpeg* 下载/构建，不入仓库
+# 各平台原生二进制：由脚本还原/构建到 resources/<平台>/，不入仓库。
+# 例外：third-party/binaries/ 里的预置归档是打包输入，必须提交（离线打包用）。
 resources/macos/
 resources/windows/
 resources/linux/
+!third-party/binaries/
 *.dylib
 *.dll
 *.so

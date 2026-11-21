@@ -1,5 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
+import java.security.MessageDigest
 
 // 版本号唯一来源：gradle.properties（可用 -PappVersion=... 临时覆盖）
 val appVersion: String = providers.gradleProperty("appVersion")
@@ -258,7 +259,49 @@ val upxArchiveName = when {
     else -> "upx-$upxBundleVersion.tar.xz"
 }
 val vlcSetupCacheDir = gradle.gradleUserHomeDir.resolve("vlcSetup")
+
+// 仓库内预置归档（third-party/binaries/）：别人 clone 后无需联网即可打包。
+// 在 vlcDownload 之前把它还原到 gradle 缓存，于是下面的 onlyIf 会判定「已存在」
+// 而跳过联网下载。校验 SHA-256，防止归档损坏或被人替换。
+val bundledVlcArchive = rootProject.layout.projectDirectory.file("third-party/binaries/$vlcArchiveName")
+// 仅 macOS 的预置归档随仓库分发；Windows/Linux 目前仍走联网下载（见 README）。
+// 对应 SHA-256 记录在 third-party/binaries/SOURCE.txt。
+val bundledVlcSha256 = when (vlcArchiveName) {
+    "vlc-$vlcBundleVersion.dmg" -> "50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0"
+    else -> null
+}
+val restoreVlcFromRepo by tasks.registering {
+    group = "compose desktop"
+    description = "Restore the pinned libvlc archive from third-party/binaries/ into the gradle cache"
+    val cacheFile = vlcSetupCacheDir.resolve(vlcArchiveName)
+    val repoFile = bundledVlcArchive.asFile
+    val expectedSha = bundledVlcSha256
+    onlyIf("缓存中尚无 $vlcArchiveName 且仓库含预置归档") {
+        !cacheFile.isFile && repoFile.isFile
+    }
+    doLast {
+        if (expectedSha != null) {
+            val digest = MessageDigest.getInstance("SHA-256")
+            repoFile.inputStream().use { input ->
+                val buf = ByteArray(8192)
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    digest.update(buf, 0, n)
+                }
+            }
+            val actual = digest.digest().joinToString("") { b -> "%02x".format(b) }
+            check(actual.equals(expectedSha, ignoreCase = true)) {
+                "预置归档 $repoFile 的 SHA-256 不匹配：期望 $expectedSha，实际 $actual。请重新获取该文件。"
+            }
+        }
+        vlcSetupCacheDir.mkdirs()
+        repoFile.copyTo(cacheFile, overwrite = true)
+        logger.lifecycle("Restored $vlcArchiveName from third-party/binaries/ (offline packaging)")
+    }
+}
 tasks.matching { it.name == "vlcDownload" }.configureEach {
+    dependsOn(restoreVlcFromRepo)
     val archive = vlcSetupCacheDir.resolve(vlcArchiveName)
     onlyIf("压缩包已预置在 $vlcSetupCacheDir") { !archive.isFile }
 }
