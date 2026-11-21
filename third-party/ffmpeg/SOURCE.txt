@@ -1,0 +1,88 @@
+FFmpeg n8.1.3  —  Source and Build Information
+=================================================
+
+Component : FFmpeg
+Version   : n8.1.3-24-g92611900bb-20261024  (based on FFmpeg 8.1 "Hoare")
+License   : GNU Lesser General Public License v3.0 or later (LGPL-3.0-or-later)
+Build     : win64-lgpl  (BtbN/FFmpeg-Builds, 64-bit Windows, LGPL v3 configuration)
+Used by   : KtDownload  —  HLS (m3u8) remux to MP4
+Integration: external process via ProcessBuilder (NOT linked; see README.md)
+
+
+Upstream source
+---------------
+Source tarball:
+    https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz
+
+Source repository:
+    https://git.ffmpeg.org/ffmpeg.git
+    branch: n8.1 (release/8.1)
+
+Release notes / changelog:
+    https://ffmpeg.org/
+    https://github.com/FFmpeg/FFmpeg/blob/n8.1.3/Changelog
+
+
+Windows binary build
+--------------------
+Provider : BtbN/FFmpeg-Builds
+Releases : https://github.com/BtbN/FFmpeg-Builds/releases
+Asset    : ffmpeg-n8.1.3-24-g92611900bb-win64-lgpl-8.1.zip
+Tag      : autobuild-2026-10-24-13-02
+
+Download URL:
+    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-24-13-02/ffmpeg-n8.1.3-24-g92611900bb-win64-lgpl-8.1.zip
+
+SHA-256 of the vendored ffmpeg.exe:
+    5a11d3d34496b6d4b3cedf0230739ddc3d2710c0ac58637ae134df801238d503
+
+Verify locally with:
+    certutil -hashfile ffmpeg.exe SHA256
+    # or on Git Bash:  sha256sum ffmpeg.exe
+
+Build configuration (verified: --enable-version3, no --enable-gpl / --enable-nonfree):
+    --prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config
+    --cross-prefix=x86_64-w64-mingw32- --arch=x86_64 --target-os=mingw32
+    --enable-version3 --disable-debug --disable-w32threads --enable-pthreads
+    --enable-iconv --enable-zlib --enable-libxml2 --enable-libvmaf
+    --enable-fontconfig --enable-libharfbuzz --enable-libfreetype
+    --enable-libfribidi --enable-lcms2 --enable-vulkan --enable-libshaderc
+    --enable-libdav1d --enable-libvorbis --enable-librav1e --enable-librsvg
+    --enable-gmp --enable-lzma --enable-liblcevc-dec --enable-opencl --enable-amf
+    --enable-libaom --enable-chromaprint --enable-libaribb24 --enable-libaribcaption
+    --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame
+    --enable-libopus --enable-libplacebo --enable-librist --enable-libssh
+    --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq --enable-lv2
+    --enable-libvpl --enable-openal --enable-liboapv --enable-libopencore-amrnb
+    --enable-libopencore-amrwb --enable-libopenh264 --enable-libopenjpeg
+    --enable-libopenmpt --enable-schannel --enable-sdl2 --enable-libsnappy
+    --enable-libsoxr --enable-libsrt --enable-libsvtav1 --enable-libtwolame
+    --enable-libuavs3d --enable-vaapi --enable-vapoursynth --enable-libzimg
+    --enable-libzvbi --extra-version=20261024
+    # NOTE: --disable-libx264 / --disable-libx265 / --disable-libxvid are explicit.
+    # --enable-version3 upgrades the license to LGPL-3.0-or-later.
+    # No --enable-gpl / --enable-nonfree present; this is an LGPL v3 build.
+
+
+LGPL compliance notes
+---------------------
+1. This file + LICENSE.txt (LGPL v3 full text) are distributed alongside ffmpeg.exe
+   (see ../LICENSE.txt and the copy shipped in resources/common/ffmpeg/).
+   The upstream LICENSE.LGPL-2.1.txt is also shipped for completeness.
+   Per-platform binaries live in resources/windows/ffmpeg/ (this file) and
+   resources/macos/ffmpeg/ (built on macOS by scripts/fetch-ffmpeg-macos.sh).
+2. The complete corresponding source is available at the URLs above.
+3. ffmpeg.exe is shipped as a standalone file under <install-dir>\resources\ffmpeg\
+   and is NOT integrity-checked or encrypted, so users may replace it with their
+   own build (see README.md).
+4. KtDownload invokes ffmpeg.exe as a separate process. No FFmpeg library is
+   linked into the application, therefore KtDownload is not a derivative work
+   under the LGPL.
+
+Verify the shipped binary is an LGPL build:
+
+    ffmpeg -version
+    # first line: ffmpeg version n8.1.3-24-g92611900bb-20261024 ...
+    ffmpeg -version | findstr configuration
+    # the configuration line MUST contain --enable-version3
+    # and MUST NOT contain --enable-gpl or --enable-nonfree

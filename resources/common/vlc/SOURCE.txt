@@ -1,0 +1,103 @@
+VLC 3.0.21 (libvlc)  —  Source and Build Information
+=====================================================
+
+Component : VLC media player — libvlc / libvlccore + plugin modules
+Version   : 3.0.21  (VLC 3.0.x series, win64 build)
+License   : GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)
+            for libvlc / libvlccore; the VLC application as a whole is GPL-2.0-or-later
+Used by   : KtDownload  —  in-app playback of m3u8 (HLS) and mp4
+Integration: dynamically linked in-process through JNA (vlcj 4.11.0);
+             see README.md and THIRD-PARTY-NOTICES.md
+
+
+Upstream source
+---------------
+Download (the archive this copy was unpacked from):
+    https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.zip
+    SHA-256: a0b7ec02b50adf6417eed014fb8df50af39690505a4225b85b3dc2ed17d14843
+
+All release builds:
+    https://get.videolan.org/vlc/3.0.21/
+
+Source repository:
+    https://code.videolan.org/videolan/vlc
+    tag: 3.0.21
+
+Matching source tarball:
+    https://get.videolan.org/vlc/3.0.21/vlc-3.0.21.tar.xz
+
+
+License texts shipped with the package
+--------------------------------------
+COPYING.txt      GNU GPL v2 — covers the VLC distribution as a whole
+                 (verbatim copy from the upstream archive)
+COPYING.LIB.txt  GNU LGPL v2.1 — covers libvlc / libvlccore, i.e. the part
+                 KtDownload actually links against
+
+Both files live in resources/common/vlc/ and are merged into
+<install-dir>/resources/vlc/ by jpackage, next to the binaries.
+
+
+What is shipped, and what was removed
+-------------------------------------
+Shipped (Windows): libvlc.dll, libvlccore.dll, plugins/
+Shipped (macOS)  : libvlc.dylib, libvlccore.dylib, plugins/
+Shipped (Linux)  : libvlc.so.*, libvlccore.so.*, plugins/
+
+Produced by the Gradle plugin ir.mahozad.vlc-setup 0.1.0
+(./gradlew :composeApp:vlcSetup), configured with shouldIncludeAllVlcFiles = true.
+
+The `pruneBundledVlc` task then deletes plugin categories that an embedded
+player never touches (~14 MB):
+
+    plugins/gui/                 Qt / skins2 user interfaces
+    plugins/visualization/       audio visualisations
+    plugins/stream_out/          transcoding / streaming output
+    plugins/access_output/       streaming output
+    plugins/services_discovery/  media library scanners (upnp, podcast, ...)
+    axvlc.dll, npvlc.dll         browser ActiveX / NPAPI plugins
+
+Codec, demux, access and video-output modules are never pruned — removing those
+breaks playback (HLS needs plugins/demux/libadaptive_plugin.dll and
+plugins/access/libhttp_plugin.dll).
+
+The DLLs themselves are byte-identical to upstream. No patching, no re-linking,
+no re-compilation.
+
+
+LGPL compliance notes
+---------------------
+1. This file plus COPYING.txt and COPYING.LIB.txt are distributed alongside the
+   binaries, both in the source tree (resources/common/vlc/) and in the package
+   (<install-dir>/resources/vlc/).
+2. The complete corresponding source is available at the URLs above.
+3. libvlc is shipped as a separate shared library under <install-dir>/resources/
+   and is NOT integrity-checked or encrypted, so a user may replace it with their
+   own build of the same version (see "Replacing libvlc" in THIRD-PARTY-NOTICES.md,
+   and the -Dktdownload.vlc=<dir> override).
+4. KtDownload links libvlc dynamically at runtime (JNA). It is not statically
+   linked, no VLC source was modified, and the interface used is the public
+   libvlc C API — LGPL-2.1 §6 is satisfied.
+5. vlcj (the Java binding) is GPL-3.0 with a linking exception that explicitly
+   permits use in non-GPL applications: https://github.com/caprica/vlcj
+
+Verify the shipped copy:
+
+    <install-dir>\resources\libvlc.dll     (exists, unmodified)
+    <install-dir>\resources\plugins\demux\libadaptive_plugin.dll   (HLS demuxer)
+    <install-dir>\resources\plugins\access\libhttp_plugin.dll      (HTTP access)
+
+    java -Dktdownload.vlc=<install-dir>\resources ...   # VlcLocator override
+
+
+Regenerating
+------------
+    ./gradlew :composeApp:vlcSetup
+
+On networks that cannot reach get.videolan.org / GitHub, pre-seed the archives:
+
+    %GRADLE_USER_HOME%\vlcSetup\vlc-3.0.21.zip
+    %GRADLE_USER_HOME%\vlcSetup\upx-4.2.4.zip
+
+The download tasks are skipped when those files already exist
+(see the "离线兜底" block in composeApp/build.gradle.kts).

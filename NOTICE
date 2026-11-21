@@ -1,0 +1,15 @@
+KtDownload
+Copyright (c) 2026 马超 (Mcly99)
+
+This project is licensed under the GNU Affero General Public License,
+version 3 (AGPL-3.0). The full license text is in the LICENSE file.
+
+Portions of this project are adapted from YunX-Desktop:
+  https://github.com/tidain/YunX-Desktop
+  Snapshot: main @ 00a030f7, tag v1.3.4 (2026-11-13)
+  License: GNU Affero General Public License v3.0
+  Source provenance and modification log: third-party/yunx-desktop/SOURCE.txt
+  Upstream license text: third-party/yunx-desktop/LICENSE.txt
+
+The complete corresponding source for this combined work is available in
+this repository. Third-party component notices are in THIRD-PARTY-NOTICES.md.

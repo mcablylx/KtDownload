@@ -1,0 +1,48 @@
+[versions]
+androidx-lifecycle = "2.10.0"
+composeHotReload = "1.0.0"
+composeMultiplatform = "1.10.3"
+junit = "4.13.2"
+kotlin = "2.3.20"
+kotlinx-coroutines = "1.10.2"
+material3 = "1.10.0-alpha05"
+# 播放内核：vlcj 4.x 对应 VLC 3.x（5.x 是 VLC 4 的预览版，暂不用）
+vlcj = "4.11.0"
+# 云盘解析器移植自 YunX-Desktop（AGPL-3.0），其 network 层用 OkHttp + org.json
+okhttp = "4.12.0"
+orgJson = "20240303"
+# 把 libvlc 打进 jpackage app resources 的 Gradle 插件（作者只在自己系统上测过，故先验证打包）
+vlcSetup = "0.1.0"
+# 内嵌 Chromium 网页登录：做法与 YunX-Desktop 一致（jcefmaven + 对应版本 natives）
+jcefmaven = "132.3.1"
+jcefNatives = "jcef-1770317+cef-132.3.1+g144febe+chromium-132.0.6834.83"
+commonsCompress = "1.27.1"
+
+[libraries]
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+androidx-lifecycle-viewmodelCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
+androidx-lifecycle-runtimeCompose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
+compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "composeMultiplatform" }
+compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "composeMultiplatform" }
+compose-material3 = { module = "org.jetbrains.compose.material3:material3", version.ref = "material3" }
+compose-ui = { module = "org.jetbrains.compose.ui:ui", version.ref = "composeMultiplatform" }
+compose-components-resources = { module = "org.jetbrains.compose.components:components-resources", version.ref = "composeMultiplatform" }
+compose-uiToolingPreview = { module = "org.jetbrains.compose.ui:ui-tooling-preview", version.ref = "composeMultiplatform" }
+kotlinx-coroutinesSwing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
+compose-icons-extended = { module = "org.jetbrains.compose.material:material-icons-extended", version.ref = "composeMultiplatform" }
+vlcj = { module = "uk.co.caprica:vlcj", version.ref = "vlcj" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+org-json = { module = "org.json:json", version.ref = "orgJson" }
+jcefmaven = { module = "me.friwi:jcefmaven", version.ref = "jcefmaven" }
+jcef-natives-windows-amd64 = { module = "me.friwi:jcef-natives-windows-amd64", version.ref = "jcefNatives" }
+jcef-natives-macosx-amd64 = { module = "me.friwi:jcef-natives-macosx-amd64", version.ref = "jcefNatives" }
+jcef-natives-macosx-arm64 = { module = "me.friwi:jcef-natives-macosx-arm64", version.ref = "jcefNatives" }
+jcef-natives-linux-amd64 = { module = "me.friwi:jcef-natives-linux-amd64", version.ref = "jcefNatives" }
+commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commonsCompress" }
+[plugins]
+composeHotReload = { id = "org.jetbrains.compose.hot-reload", version.ref = "composeHotReload" }
+composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+vlcSetup = { id = "ir.mahozad.vlc-setup", version.ref = "vlcSetup" }

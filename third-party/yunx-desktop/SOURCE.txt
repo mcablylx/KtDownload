@@ -1,0 +1,804 @@
+YunX-Desktop cloud-drive resolver — source provenance
+====================================================
+
+Upstream project : https://github.com/tidain/YunX-Desktop
+License          : GNU Affero General Public License v3.0 (AGPL-3.0)
+                   full text in LICENSE.txt (this directory)
+Snapshot         : main branch @ 00a030f7 (tag v1.3.4, 2026-11-13 11:22 +0800);
+                   downloaded 2026-11-13 21:22
+Source archive   : H:/work/YunX-Desktop-main-1.3.4.zip (local working copy;
+                   SHA-256 44c4678614042df59ca0337f344fe90ba5336aca70787f7ccf10dd22b974eb7d)
+                   unpacked  : H:/work/YunX-Desktop-main-1.3.4/
+                   codeload: https://codeload.github.com/tidain/YunX-Desktop/zip/refs/heads/main
+Previous snapshot: v1.3.3 era — H:/work/YunX-Desktop-main.zip
+                   (SHA-256 878bbc83d0ac6017b921cc9c0dafa865c031682eba2256b34d455e83e65bcbd9)
+
+v1.3.3 -> v1.3.4 upstream diff reviewed on 2026-11-13: 7 commits, 8 files
+(version.txt, desktop/build.gradle.kts, BaiduCloudViewModel.kt,
+data/download/DownloadManager.kt, DownloadListLayout.kt (new),
+ui/screens/DownloadScreen.kt + 2 test files). NONE of the 47 ported resolver
+files changed UPSTREAM, so no re-port was required.
+IMPORTANT: that statement concerns the upstream snapshot only. The DOWNSTREAM
+working tree does contain local modifications — see "Downstream changes" below.
+Until the 2026-11-14 audit (docs/CLOUD_DRIVE_DIFF.md §4/§5) most of them were
+not recorded in this file, which made the phrase "verbatim" misleading and did
+not meet AGPL-3.0's requirement to mark changed files.
+
+Ported into KtDownload on branch cloud_drive_download.
+All files carry a header identifying the upstream source and the AGPL-3.0 license.
+On 2026-11-14 the header of all 47 ported files (+2 adapted JCEF files) was
+corrected from "release v1.3.3 era" to "main branch @ 00a030f7 (tag v1.3.4)",
+matching the snapshot declared on line 7.
+
+Package layout: the ported files were originally kept verbatim under the upstream
+package names (com.yunx.app.*) to ease diffing. On 2026-11-13 they were relocated
+into KtDownload's single package tree (com.yunx.app.data.* -> top.mcly99.dl.data.*,
+com.yunx.app.util -> top.mcly99.dl.utils, com.yunx.app.AppContext ->
+top.mcly99.dl.data.AppContext). The relocation is mechanical: package and import
+statements only, no logic change. To diff against a new upstream release, match by
+file name rather than by package path.
+
+Modifications
+-------------
+- 2026-11-13 package relocation (mechanical, no logic change):
+  com.yunx.app.data.{network,repository,db} -> top.mcly99.dl.data.{network,repository,db};
+  com.yunx.app.util.Log -> top.mcly99.dl.utils.Log;
+  com.yunx.app.AppContext -> top.mcly99.dl.data.AppContext.
+- Added the provenance/license header to every ported file.
+- Added small compatibility shims (clearly marked) replacing upstream app services:
+  AppContext.kt (java.util.prefs replaced by a properties file — the jlink
+  runtime image does not include java.prefs), util/Log.kt + DiagnosticLog.kt
+  (forwarded to KtDownload AppLogger), data/db/XunleiAccountEntity.kt,
+  data/repository/ILanzouAccountRepository.kt (account DB not ported).
+- Upstream Compose UI, SQLite persistence, download engine and player were NOT
+  ported. KtDownload calls the ported resolver through
+  top.mcly99.dl.engine.clouddrive.CloudDriveService.
+- Build dependencies added: OkHttp 4.12.0 (Apache-2.0), org.json 20240303 (JSON
+  license), jcefmaven 132.3.1 (Apache-2.0) + the matching Windows JCEF natives
+  + commons-compress 1.27.1 (Apache-2.0) for the in-app browser login.
+- Downstream fix in data/network/XunleiApi.kt (marked "ktdown 适配", 2026-11-13):
+  upstream's panCallAnonymous deliberately sends no captcha token, but the Xunlei
+  anonymous share API now rejects that with captcha_invalid / "验证码无效"
+  (detail: "captcha_token is empty") and requires a matching X-Client-Id header.
+  KtDownload now self-signs a guest captcha token via the existing web-channel
+  9-salt algorithm (initWebCaptcha), caches it per (deviceId, action) until expiry,
+  adds X-Client-Id for guest pan requests, and re-signs once on captcha_invalid.
+  No upstream behaviour for authenticated requests was changed.
+- KtDownload UI alignment (2026-11-13, updated 2026-11-14): the "网盘列表"
+  panel is a from-scratch KtDownload implementation of the per-platform
+  account-card list from upstream ui/screens/DriveScreen.kt (no upstream UI
+  source was copied). It keeps one Cookie/token per platform. As of 2026-11-14
+  these are AES-256-GCM encrypted at rest in ~/.mclydownload/ via
+  engine/clouddrive/CloudCredentialStorage.kt (upstream's SQLite account DB,
+  multi-account directory and DPAPI key wrapping were still NOT ported).
+  Space quota is queried for 9 platforms: the original 6 single-credential ones
+  plus Xunlei / GuangYa / ILanzou, whose multi-parameter signatures are fed by
+  engine/clouddrive/CloudCredentialFields.kt. Lanzou has no quota API upstream
+  and is still skipped. The GitHub placeholder card was removed (the SharePlatform
+  enum value remains in the ported parser); GitHub URLs are now detected in
+  CloudDriveViewModel and point the user to Catch Web / Add task instead.
+- In-app web login (2026-11-13): the JCEF login flow was ADAPTED (not copied
+  verbatim) from upstream ui/jcef/JcefHolder.kt, ui/jcef/JcefLoginPane.kt,
+  util/CookieCleaner.kt, ui/login/XunleiWebLoginScreen.kt and the *LoginScreen.kt
+  login URLs / required Cookie keys. KtDownload files:
+    top/mcly99/dl/engine/clouddrive/browser/JcefHolder.kt
+    top/mcly99/dl/engine/clouddrive/browser/JcefCookies.kt
+    top/mcly99/dl/engine/clouddrive/CloudDriveLoginConfig.kt
+    top/mcly99/dl/ui/components/CloudDriveLoginScreen.kt
+  Differences: no BrowserCookieImporter (JNA/DPAPI/SQLite), no separate login
+  windows (full-screen overlay inside the main window), native bundle is shipped
+  as the jcef-natives jar on the classpath rather than as a repacked tar.gz.
+  As of 2026-11-14 credentials ARE persisted, but in an encrypted properties
+  file (CloudCredentialStorage.kt, AES-256-GCM + a 0600 master-key file), NOT in
+  upstream's SQLite account DB; there is still no multi-account directory,
+  primary account, remark or password-protected auth backup.
+  The two Xunlei bridge readers (collectXunleiCredential and the old
+  collectXunleiAccessToken) were merged: cookie-share reassembly now lives only
+  in XunleiDriveCredential.fromCookiePairs.
+  These adapted files are AGPL-3.0 derivative works of YunX-Desktop.
+
+Downstream changes NOT recorded before the 2026-11-14 audit
+-----------------------------------------------------------
+Every item below changes one of the 47 AGPL-3.0 ported files and therefore
+remains an AGPL-3.0 derivative work. Evidence: docs/CLOUD_DRIVE_DIFF.md §4
+(mechanical diff) and §5.1 (IDs D-01..D-10). They were found by comparing the
+working tree with upstream tag v1.3.4 — not from the upstream changelog, which
+is why the earlier "verbatim" wording above was misleading.
+
+  D-01  data/network/BaiduApi.kt — +19 functions / ~+869 lines: parses the share
+        page's window.yunData for shareid / share_uk / sign / timestamp / bdstoken,
+        signs /share/tplconfig and calls /api/sharedownload (the web "Download"
+        button) to obtain a direct link WITHOUT transferring, plus errno-branched
+        transfer retries (transferOnce / parseTransferResult / transferError).
+  D-02  data/repository/BaiduResolveRepository.kt — +~272 lines: two-channel
+        resolver "no-save first, fall back to transfer"
+        (getShareDownloadLinkWithoutSave / transferToTemp / awaitTransferred /
+        freshWorkDir / findTransferred).
+  D-03  data/network/BaiduConstants.kt — added apiSurl(), sharePageUrl(),
+        hasStoken(), cookieKeys() and LEGACY_TEMP_DIR_NAMES = ["YunX临时转存"]
+        (so a temp dir created by an older build is reused).
+  D-04  data/network/BaiduApiException.kt — added `errno: Int?` for error-code
+        branching in the resolver.
+  D-05  TEMP_DIR_NAME "YunX临时转存" -> "MclyDownload临时转存" in QuarkConstants.kt,
+        UCConstants.kt, XunleiConstants.kt, Pan115Constants.kt, BaiduConstants.kt.
+        Behavioural difference: the same account creates differently named temp
+        folders in the two applications.
+  D-06  data/repository/ShareResolveRepository.kt — KDoc now states that both
+        Quark and Baidu override getShareDownloadLinkWithoutSave.
+  D-07  QuarkResolveRepository.kt / Pan115ResolveRepository.kt — KDoc updated to
+        match the renamed temp dir.
+  D-08  XunleiResolveRepository.kt — `if (exp > 0 && exp - now > 60) return`
+        split into `if (exp <= 0) return` + `if (exp - now > 60) return`, so an
+        opaque (non-JWT) token is no longer treated as expired and rotated.
+  D-09  XunleiWebCredential.kt — KDoc no longer references upstream
+        video.HeadlessWebView; ktdown collects bridge cookies via JcefCookies.
+  D-10  Provenance headers said "release v1.3.3 era" while this file declared
+        tag v1.3.4 — corrected on 2026-11-14 (see the header note above).
+
+Already recorded before the audit: XunleiApi guest-captcha self-signing (D-11,
+described above) and the ILanzouAccountRepository shim (D-12).
+
+Changes made in the 2026-11-14 development round
+------------------------------------------------
+  N-01  data/repository/ShareResolveRepository.kt — added
+        `val supportsSeparateNoSaveLink: Boolean = false`, overridden to true in
+        QuarkResolveRepository.kt and BaiduResolveRepository.kt. The glue layer
+        now asks the repository whether a separate no-save implementation exists
+        instead of hard-coding a {QUARK, BAIDU} whitelist when deciding whether
+        a failed no-save attempt may be retried through the transfer path.
+  N-02  47 ported headers + 2 adapted JCEF headers — snapshot version corrected
+        to v1.3.4 (D-10). No upstream logic was re-ported; no ported file was
+        added or removed.
+  N-03  data/AppContext.kt — corrected the shim comment. build.gradle.kts
+        modules(...) DOES include "java.prefs", so the old claim that the jlink
+        image lacks it was wrong; the properties-backed shim is a deliberate
+        storage choice and stays.
+  N-04  KtDownload-original glue/UI/test files (engine/clouddrive/*,
+        viewmodel/, ui/components/, jvmTest/) changed in this round are NOT part
+        of the 47 ported sources and need no upstream attribution. The two
+        adapted JCEF login files are a separate case: they remain AGPL-3.0
+        derivative works, and the logic change to one of them is recorded as
+        N-05 below. Highlights: cleanupTempDir is now wired from the download
+        task terminal state (CloudLink.cleanupDirFid -> CloudDriveViewModel ->
+        AppViewModel.onDownloadTasksChanged), quota covers 9 platforms, credentials
+        are encrypted at rest, the GitHub placeholder card is gone, netdisk
+        notices are localised via CloudDriveStrings, and the upstream
+        ShareLinkParserTest was ported to jvmTest.
+  N-05  engine/clouddrive/browser/JcefCookies.kt (adapted JCEF login file,
+        AGPL-3.0 derivative work) — removed the second Xunlei cookie assembly
+        implementation `collectXunleiAccessToken()`. `collectXunleiCredential()`
+        now delegates the chunk reassembly to the single ktdown-owned
+        `XunleiDriveCredential.fromCookiePairs()` helper; URLDecoder and
+        XunleiWebCredential imports were dropped. CloudDriveLoginScreen.kt
+        (ktdown-original UI) accordingly polls only `collectXunleiCredential()`.
+        This is a downstream modification to an AGPL-3.0 derivative work and is
+        declared here under AGPL-3.0 §5(a); JcefHolder.kt changed only in its
+        provenance header (N-02).
+
+  N-06  Batch 1 (2026-11-14) — Chinese share commands, D-19 + D-20.
+        * NEW ported upstream files (49 total now, snapshot still v1.3.4):
+            data/network/StarSeaApi.kt        (upstream 125 lines)
+            data/network/StarSeaConstants.kt  (upstream  29 lines)
+          Both carry the standard AGPL-3.0 provenance header. StarSeaApi.kt has
+          one downstream adaptation: com.yunx.app.util.Log was replaced with
+          top.mcly99.dl.utils.AppLogger (the same shim as D-13); its KDoc gained
+          two downstream notes. Everything else — including the Chinese
+          describeFailure() messages — is verbatim. StarSeaConstants.kt is a
+          package rename only. Declared here under AGPL-3.0 §5(a).
+        * D-20: XunleiKouling.kt / XunleiApi.parseKouling /
+          XunleiResolveRepository.resolveKouling were already among the 47
+          ported files but were never called. They are now reached through
+          engine/clouddrive/CloudDriveService.resolveCommand(), which mirrors
+          upstream ResolveViewModel.startResolve:902-925 — try the Xunlei
+          command first, fall back to StarSea, then re-parse the resulting
+          share link with the existing ShareLinkParser.
+        * Downstream-only glue/UI (KtDownload originals, no upstream source
+          copied): CloudDriveApi.resolveCommand() returns Result<String>? where
+          null means "not a command, no network request"; CloudDriveViewModel
+          .resolve() defers platform/credential/root-dir selection until after
+          command resolution and displays the resolved link in the result;
+          UiStrings.CloudDriveStrings adds commandResolving / commandResolved /
+          commandResolveFailed in both zhCN and enUS.
+        * Privacy hardening not present upstream: StarSeaApi.looksLikeCommand()
+          only rejects URLs and over-long text, so upstream sends essentially
+          any ordinary text to the third-party service. KtDownload additionally
+          requires at least one CJK character before trying StarSea.
+        * Tests: jvmTest/data/network/ShareCommandTest.kt (pure logic + glue
+          local branches, no network) and three new CloudDriveViewModelTest
+          cases for command success / platform selection / service failure.
+
+  N-07  Batch 2 (2026-11-14) — GitHub subsystem, D-18.
+        * NEW ported upstream files (56 total now, snapshot still v1.3.4):
+            data/network/GitHubApi.kt                (upstream 350 lines)
+            data/network/GitHubCommitDateCache.kt   (upstream 112 lines)
+            data/network/GitHubLinkParser.kt        (upstream 117 lines)
+            data/network/GitHubMirror.kt            (upstream 229 lines)
+            data/network/GitHubModels.kt            (upstream  70 lines)
+            data/network/GitHubResponseCache.kt     (upstream  99 lines)
+            data/network/GitHubTokenStore.kt        (upstream  60 lines)
+                                                  --------------------
+                                                  total      1,037 lines
+          All seven carry AGPL-3.0 provenance headers. Verbatim except for the
+          namespace change in:
+            GitHubModels.kt / GitHubLinkParser.kt / GitHubResponseCache.kt /
+            GitHubCommitDateCache.kt  — package rename ONLY.
+            GitHubApi.kt               — two downstream changes: the User-Agent
+              header identifies "MclyDownload" instead of "YunX", and the
+              header records that change (N-07). All API paths, cache keys,
+              TokenCheck parsing, 401 handling and JSON mapping are verbatim.
+          Adapted (header says "Adapted from", with an explicit change list):
+            GitHubMirror.kt — upstream SettingsRepository (data/prefs, not
+              ported) replaced by ktdown's AppContext.miscPrefs / ShimPrefs;
+              Log shimmed; TAG/PROBE_UA renamed; added isEnabled / setEnabled /
+              setPrefix / fixedPrefix / probes / injectable prefs. BEHAVIOUR
+              CHANGE (batch 2): upstream proxies EVERY GitHub download through
+              a third-party gh-proxy host by default; ktdown originally
+              defaulted to DIRECT (empty prefix) and only proxied after
+              explicit user opt-in. SUPERSEDED by N-11 (P2, 2026-11-15):
+              the default is now AUTO, but a mirror is used only after a
+              successful probe — see N-11.
+            GitHubTokenStore.kt — upstream FileCredentialCipher (data/security,
+              not ported) replaced by ktdown's existing AES-256-GCM
+              CloudDriveAccountStore.sharedStorage; added injectable
+              tokenReader/tokenWriter so the account store stays the single
+              source of truth; Log shimmed. The upstream "never delete on a
+              failed decrypt" rule is preserved.
+          Declared here under AGPL-3.0 section 5(a).
+        * DELIBERATELY NOT PORTED, and why (product boundary for this batch):
+            ui/components/GitHubMarkdownImageTransformer.kt (1,329 lines) —
+              GFM README image rewriting/rendering. KtDownload has no Markdown
+              renderer in the cloud-drive page, so README rendering is out of
+              scope; no upstream code from it is present in this tree.
+            ui/viewmodel/ResolveViewModel.kt GitHub section (~414 lines) and
+              ui/screens/ResolveScreen.kt GitHub UI — NOT copied. The
+              downstream-original engine/clouddrive/GitHubBrowser.kt reimplements
+              the navigation by projecting repo trees / Releases / account repo
+              lists onto ktdown's existing ShareFile list, so the existing
+              search / sort / breadcrumb / multi-select / batch download UI
+              serves GitHub without any upstream UI source.
+        * Downstream behaviour differences in GitHubBrowser.kt (KtDownload
+          original, NOT upstream code): fid "github:auto" lets one parse entry
+          decide repo root vs account list vs direct file; "github:direct:<url>"
+          renders a direct-file URL as a one-item list instead of upstream's
+          confirm dialog; nested tree paths are joined with their parent path
+          before building raw URLs (upstream uses the Git Trees API's single
+          level name, which loses parent directories below level 1); draft
+          Releases are hidden; prereleases are labelled; path segments are
+          percent-encoded. Token is optional and only raises the API rate
+          limit from 60/hour to 5,000/hour.
+        * KtDownload-original glue/UI changed in this batch (no upstream source
+          copied): CloudDriveService.parse() now recognises GitHub links;
+          createSession / listFiles / downloadLink / rootDirFid route GITHUB to
+          GitHubBrowser; CloudDriveViewModel drops its three hard GitHub blocks;
+          CloudDriveCatalog restores the GitHub card as an optional-token card
+          and supportsCredential() is now true for every platform;
+          CloudDriveScreen adds the previously unwired credential editor
+          (password-masked) and a mirror selection row; UiStrings gains the
+          GitHub strings in both zhCN and enUS; GitHubMirror.ensureFresh() runs
+          only when the user has enabled mirroring.
+        * Tests (all zero-network): jvmTest/data/network/GitHubLinkParserTest.kt,
+          GitHubResponseCacheTest.kt, GitHubMirrorTest.kt (injects a temp
+          ShimPrefs), GitHubTokenStoreTest.kt (injects in-memory reader/writer),
+          and jvmTest/engine/clouddrive/GitHubBrowserTest.kt (FakeSource covers
+          roots, nested trees, ZIP, Releases/assets, account->repo navigation,
+          direct files, mirror prefixes and the CloudDriveService routing).
+
+  N-08  Batch 0 (2026-11-14) — D-29 leftovers (link history / bookmarks) and
+        the D-36 / D-48 test gaps. NO new upstream source was ported in this
+        batch: the ported file count stays at 56 and no AGPL-3.0 file changed.
+        Upstream's bookmark feature (ui/screens/BookmarkScreen.kt 659 lines,
+        LinkHistoryDialog.kt, BookmarkViewModel.kt and the SQLite
+        BookmarkEntity / DAO) was DELIBERATELY NOT COPIED; upstream's "preview"
+        is a ffplay-based video overlay (ui/components/VideoPreviewOverlay.kt)
+        that belongs to the D-21 video module, also out of scope here.
+        KtDownload-original additions instead:
+          engine/clouddrive/CloudLinkLibrary.kt — local JSON store at
+            ~/.mclydownload/cloud-links.json, owner-only permissions, atomic
+            replace, 30-entry history / 100-entry bookmark caps, corrupt-file
+            degradation, injectable dir/clock. Share text with passcodes never
+            leaves the machine.
+          viewmodel/CloudDriveViewModel.kt — linkHistory / bookmarks /
+            linkPicker state, reuseEntry(), toggleCurrentBookmark(), remove /
+            clear actions; a successful resolve records the EFFECTIVE link
+            (i.e. the real URL produced from a Chinese share command, so reuse
+            does not contact the third-party command service again). reuseEntry()
+            clears the previous passcode (including a manually typed one) and
+            goes through updateUrl() so the new link's pwd= is auto-filled.
+          ui/components/HeaderBar.kt + AppNew.kt — history / bookmark buttons
+            in the cloud-drive header; ui/components/CloudDriveScreen.kt —
+            LinkPickerDialog, per-entry removal, clear-all and a bookmark
+            toggle on the result pane; theme/UiStrings.kt — 9 new strings in
+            both zhCN and enUS.
+          engine/clouddrive/CloudDriveService.kt — added a nullable
+            repositoryOverride constructor argument (production default null)
+            so the three download-link paths can be unit-tested with a fake;
+            createRepository() itself is unchanged.
+        Tests (all zero-network): jvmTest/engine/clouddrive/
+        CloudLinkLibraryTest.kt, CloudDriveServiceDownloadLinkTest.kt,
+        engine/RateLimiterTest.kt, engine/ProxySupportTest.kt, plus new
+        CloudDriveViewModelTest cases for history / bookmarks / quota-refresh
+        failure isolation and stale-job cancellation.
+
+  N-09  In-app attribution (2026-11-14) — closes the last non-owner-decision
+        TODO in THIRD-PARTY-NOTICES.md. NO new upstream source was ported and
+        NO AGPL-3.0 file changed: the count stays at 56. A repository-root
+        notice is invisible to end users, so AGPL-3.0 §5(a)/§13 attribution is
+        now also rendered in the app. KtDownload-original additions only:
+          theme/LicenseStrings.kt — bilingual (zhCN / enUS) data table with 4
+            third-party components (FFmpeg LGPL-3.0-or-later, VLC/libvlc
+            LGPL-2.1, JCEF/Chromium Apache-2.0 / BSD-style, YunX-Desktop
+            AGPL-3.0). The AGPL entry carries the upstream project + URL,
+            snapshot v1.3.4 @ 00a030f7, 56 files / 13,670 lines, the path to
+            SOURCE.txt (downstream modifications) and LICENSE.txt (full text).
+            A prominent warning states that the root MIT LICENSE is not
+            sufficient, the §13 decision is pending, and no binary from this
+            branch may be published. Mounted as ONE grouped field on UiStrings
+            because that data class is near the JVM 255-parameter limit.
+          ui/components/OpenSourceLicensesDialog.kt — renders the table;
+            "Open license folder" opens the parent of FfmpegLocator's ffmpeg
+            directory, which also holds vlc/ and yunx-desktop/ license texts.
+          ui/components/SettingsScreen.kt — the button now opens the dialog
+            instead of just launching the file manager on the FFmpeg folder.
+          jvmTest/theme/LicenseStringsTest.kt — locks the attribution markers,
+            zh/en parity, and the existence of all 3 bundled license texts.
+        THIRD-PARTY-NOTICES.md §"In-app attribution" records the same. The
+        OWNER DECISION TODO (relicense vs. process isolation) is deliberately
+        STILL OPEN and the root LICENSE remains untouched.
+
+  N-10  P1 network settings (2026-11-15) — HTTP/2 wiring and the three-state
+        proxy. NO new upstream source was ported: the count stays at 56.
+        ONE AGPL-3.0 file changed:
+          data/network/HttpClients.kt — setProxy(Proxy?) now keeps the
+            java.net.Proxy object (SOCKS is no longer flattened to host/port);
+            add setProxyProvider(() -> Proxy?) for live resolution; compare an
+            address fingerprint in apiClient()/downloadClient() so a changed
+            system proxy rebuilds the cached clients; setHttp2Enabled() still
+            clears the caches. The protocol switch itself was already there —
+            what was missing was any caller.
+        KtDownload-original additions (NOT upstream files): model/ProxyMode.kt,
+          data/network/PlatformProxyDetector.kt, theme/NetworkStrings.kt,
+          engine/ProxySupport.kt resolveProxy(), plus SettingsRepository /
+          AppViewModel / DownloadViewModel / DownloadEngine / SettingsScreen
+          wiring and 4 new jvmTest suites. PlatformProxyDetector is a
+          cross-platform rewrite (macOS scutil --proxy, Windows reg query,
+          Linux env/gsettings/ProxySelector); upstream's SystemProxy.kt is
+          Windows-only JNA and was deliberately NOT copied.
+        The in-app attribution (LicenseStrings.kt, N-09) still reports the
+        unchanged 56-file / 13,670-line upstream snapshot.
+
+  N-11  P2 GitHub mirror default (2026-11-15) — closes CLOUD_DRIVE_GAP.md
+        1.6. NO new upstream source was ported: the count stays at 56.
+        ONE AGPL-3.0 file changed:
+          data/network/GitHubMirror.kt — default of isEnabled() flipped from
+            false to true (an older explicit "direct" choice is persisted and
+            still wins); activePrefix() no longer falls back to PRESETS.first()
+            when no probe result exists, so an untested mirror can never enter
+            a download URL; when every probe fails the prefix is empty (GitHub
+            direct); a failed round uses a 10-minute retry TTL instead of 6
+            hours; ensureFresh() skips probing when the user fixed a preset or
+            chose direct. Added injectable prober/clock, the synchronous
+            applyProbeResults() / shouldRefresh() helpers and resetForTest()
+            for offline tests. The five-mirror throughput probe itself, the
+            88MB Range sample and PRESETS are unchanged upstream logic.
+        PRIVACY BOUNDARY: only PUBLIC GitHub download URLs (raw.githubusercontent
+          / codeload / release assets) can carry a mirror prefix; api.github.com
+          metadata requests are never routed through a third party. The
+          cloud-drive page now displays the actually active mirror (or
+          "direct") so traffic is visible, and an explicit "Direct" choice
+          disables probing entirely. A 256KB Range probe per mirror is sent
+          at startup (6h TTL, 10min after a failed round) unless disabled.
+        KtDownload-original wiring (NOT upstream files): CloudDriveService,
+          CloudDriveViewModel, CloudDriveScreen MirrorRow, AppViewModel and
+          the zh/en CloudDriveStrings rows. GitHubMirrorTest now covers 10
+          offline cases including both TTLs and the settings round-trip.
+
+  N-12  P3 multi-account pool + C1 rotation (2026-11-15) — closes
+        CLOUD_DRIVE_GAP.md 1.1 / 2.1 / 2.2 (C1 only; C2 remains out of scope).
+        NO new upstream source was ported and NO AGPL-3.0 file was modified:
+        the count stays at 56 files / 13,670 lines. The user explicitly chose
+        a self-authored encrypted account pool over copying the upstream
+        14-table SQLite schema (whose strict key tier depends on Windows DPAPI
+        and does not apply to macOS/Linux).
+        KtDownload-original additions (NOT upstream files):
+          engine/clouddrive/CloudAccountPool.kt — CloudAccount / CloudAccount
+            Storage plus InMemory and File implementations. Encrypted
+            properties with composite keys acct|<PLATFORM>|<id> -> v2:<iv>:<ct>
+            (AES-256-GCM, 12-byte IV, 128-bit tag, AAD bound to platform AND
+            account id, 0700 dir / 0600 files, tmp + ATOMIC_MOVE); plaintext
+            metadata under meta|<PLATFORM>|<id> caches nickname / remark /
+            isPrimary / updatedAt. Reuses the existing 32-byte
+            cloud-credentials.key with a distinct purpose prefix.
+          engine/clouddrive/CloudDriveAccounts.kt — CloudDriveAccountStore
+            keeps every legacy API mapped to the primary account, adds
+            addAccount / setPrimary / rename / remove / updateCredential /
+            accountsFor / allCredentials; migrates the old single credential
+            to a primary account on first launch and keeps writing a
+            primary-account projection to CloudCredentialStorage so
+            GitHubTokenStore and an older build still work.
+          model/Models.kt + data/SettingsRepository.kt — multiAccountDownload
+            switch, DEFAULT OFF, persisted; theme/MultiAccountStrings.kt is a
+            standalone zh/en table (UiStrings is at the JVM 255-parameter
+            limit); ui/components/SettingsScreen.kt hosts the switch.
+          viewmodel/CloudDriveViewModel.kt — credentialRotation() rotates a
+            de-duplicated credential pool per FILE (primary first), skips
+            guest / GitHub / single-account cases, never retries a failed
+            file on another account, and passes the SAME credential to
+            cleanup registration; activeCredential lets bindCredentialSink
+            write a refreshed token back to the account actually used.
+          ui/components/CloudDriveScreen.kt — AccountPanel for list / primary
+            badge / set-primary / remark / sign-out / add; startAddAccount
+            reuses the in-app JCEF login, normal re-login still overwrites
+            the primary (mirrors upstream resolveAccountSlot).
+          jvmTest: CloudAccountPoolTest, MultiAccountStringsTest, plus new
+            C1 and account-panel cases in CloudDriveViewModelTest and
+            SettingsRepositoryTest.
+        Upstream review note: B:ResolveViewModel.kt assembles pendingAltLinks
+          for C2 but never passes it to enqueueDownload — upstream C2 is
+          effectively inert; if C2 is ever implemented downstream that wire
+          must be added rather than copied as-is.
+        The in-app attribution (LicenseStrings.kt, N-09) still reports the
+        unchanged 56-file / 13,670-line upstream snapshot.
+
+  N-13  C2 single-file multi-source chunk download (2026-11-15) — closes
+        CLOUD_DRIVE_GAP.md 2.2 (C2). NO new upstream source was ported and
+        NO AGPL-3.0 file was modified: the count stays at 56 files /
+        13,670 lines. This is the wire the upstream review found missing:
+        B:ResolveViewModel.kt builds pendingAltLinks but never passes it to
+        enqueueDownload, so upstream C2 is inert.
+        KtDownload-original additions (NOT upstream files):
+          model/DownloadSource.kt — a (URL + full header set) pair. The URL
+            and the session Cookie are bound together, so the engine can
+            never swap a URL while keeping another account's Cookie.
+          model/DownloadTask.kt / engine/clouddrive/CloudModels.kt —
+            altSources on the task and on CloudLink; only held in memory.
+          viewmodel/CloudDriveViewModel.kt — prefetches one alternative
+            link per extra account for the SAME file, limited to QUARK / UC /
+            XUNLEI / BAIDU with 2+ accounts, guarded by both C1 and C2
+            switches; passes altSources to onDownload together with the
+            primary link and registers cleanups for prefetch temp dirs.
+          engine/DownloadEngine.kt — downloadSources() returns
+            List<Pair<String, RequestAuth>>; chunks rotate over sources and
+            retry on a different source after a failure.
+          engine/TaskStore.kt — deliberately DOES NOT persist altSources or
+            any Cookie. A multiSource=1 marker restores such tasks as FAILED
+            with MULTI_SOURCE_NOT_PERSISTED_MESSAGE (signed links expire).
+          model/Models.kt + data/SettingsRepository.kt — multiSourceDownload
+            switch, DEFAULT OFF; the read/write paths enforce c1 && c2.
+          theme/MultiAccountStrings.kt / ui/components/SettingsScreen.kt —
+            the C2 switch and its "requires C1" warning, standalone zh/en.
+          viewmodel/DownloadViewModel.kt / AppViewModel.kt — pass-through.
+          jvmTest: DownloadEngineMultiSourceTest (new), plus new cases in
+            TaskStoreTest, CloudDriveViewModelTest, SettingsRepositoryTest,
+            MultiAccountStringsTest and DownloadEngineIntegrationTest.
+
+  N-14  P4 unified "My Drive" file management (2026-11-15) — closes
+        CLOUD_DRIVE_GAP.md 2.3 / 2.4. NO new upstream source was ported and
+        NO AGPL-3.0 file was modified: the count stays at 56 files /
+        13,670 lines. The user explicitly chose ONE self-authored page for
+        10 drives over porting the upstream 9 *CloudScreen.kt + 10
+        *CloudViewModel.kt + CloudFileSheets.kt (~15,000 lines of AGPL UI),
+        which would also have imported the upstream fake "recycle bin can
+        restore" wording.
+        KtDownload-original additions (NOT upstream files):
+          engine/clouddrive/MyDriveModels.kt — unified MyDriveFile (id is
+            always a String even where a platform uses paths or prefixed
+            ids), MyDriveCapabilities, quota / share / save-result models.
+          engine/clouddrive/MyDriveApi.kt — interface + DefaultMyDriveApi.
+            Download links and share-to-my-drive reuse the existing
+            ShareResolveRepository contract (getDownloadLink, and
+            createSession -> listFiles -> transferFile); the factory is
+            injectable for offline tests. CloudDriveService.repository()
+            was widened from private to internal for same-module reuse —
+            CloudDriveService is KtDownload-original glue, not an upstream
+            file. Refreshed Xunlei tokens are written back to the account
+            pool through the injected credential sink.
+          engine/clouddrive/MyDriveAdapters.kt — TEN platform adapters that
+            only adapt call signatures to already-ported *Api.kt classes;
+            no ported file was edited. Capability bits reflect real API
+            availability: LANZOU has no quota and no share-to-drive,
+            ILANZOU has no createShare, GITHUB is excluded entirely.
+            Upload and recycle-bin actions are deliberately NOT offered.
+          viewmodel/MyDriveViewModel.kt + ui/components/MyDriveScreen.kt —
+            one page with platform/account selection, breadcrumbs, quota,
+            multi-select, new folder, rename, move (separate dir stack),
+            delete with a confirm dialog, create share (two expiry tiers),
+            download, and save-share. Unsupported buttons are hidden.
+          theme/MyDriveStrings.kt — standalone zh/en table; UiStrings is
+            NOT touched (JVM 255-parameter limit, see N-10).
+          model/Models.kt / ui/components/SidebarPanel.kt /
+            ui/components/HeaderBar.kt / AppNew.kt / viewmodel/AppViewModel.kt
+            — ViewType.MyDrive, nav entry, header and download wiring.
+          jvmTest: MyDriveApiTest, MyDriveViewModelTest,
+            MyDriveStringsTest — all offline fakes, no real account was
+            used to verify the 10 adapters end to end.
+        The in-app attribution (LicenseStrings.kt, N-09) still reports the
+        unchanged 56-file / 13,670-line upstream snapshot.
+
+  N-15  v1.3.4 release-notes audit + hidden-pitfall fixes (2026-11-15) —
+        see docs/UPSTREAM_SYNC_2026-11-15.md. GitHub origin/main was checked
+        again and is STILL 00a030f778a65840e9be65baecb15497a94b04ec (zero new
+        commits since the v1.3.4 baseline), so this batch aligns *fixes* from
+        the v1.3.4 release notes rather than chasing a newer version.
+        NO new upstream source was ported and NO AGPL-3.0 file was modified:
+        the count stays at 56 files / 13,670 lines and the root LICENSE is
+        untouched. Every file below is KtDownload-original work.
+
+        (1) Non-ASCII HTTP header values (upstream 1830497). Upstream cleaned
+            browser-plugin Cookie values before OkHttp header validation.
+            Downstream collects cookies via CDP Network.getAllCookies, which
+            can carry the same Chinese/emoji values. New engine/
+            HttpHeaderValues.kt accepts only visible ASCII (0x20..0x7E) and
+            percent-encodes everything else as UTF-8 (also CRLF/TAB/controls,
+            closing header injection). All four HttpURLConnection call sites
+            (engine/DownloadEngine.kt, engine/hls/HlsDownloader.kt,
+            engine/web/HttpProbe.kt, engine/web/WebPageFetcher.kt) now use
+            setSafeHeader(); engine/web/browser/BrowserCapture.kt sanitizes
+            CDP cookie values at ingress; engine/clouddrive/
+            CloudDriveService.useCredential() sanitizes cookie-like login
+            credentials but explicitly SPARES structured JSON credentials
+            (Xunlei), which must stay parseable. No ported *Api.kt was edited.
+
+        (2) Resume plan drift (same failure class as upstream d1b888f).
+            Upstream fixed overlapping *elastic* chunks; downstream has no
+            elastic allocator at all, but changing the thread count or a
+            changed remote length makes fixed .partN/.offset files belong to
+            a DIFFERENT byte range. Merging them produces a silently corrupt
+            file. New engine/DownloadFileSupport.kt helpers write a
+            <name>.chunks.plan signature (total|count|threads); engine/
+            DownloadEngine.kt calls reconcileChunkPlan() before chunking,
+            discards stale parts (including legacy tasks with no plan),
+            clears the plan after a successful merge / task removal, and
+            cleans abandoned multi-thread parts when switching to one thread.
+
+        (3) Shut down when downloads finish (upstream 3700c1c / PR #75-era
+            release notes). New utils/DesktopActions.kt, theme/
+            ShutdownStrings.kt, viewmodel/ShutdownAfterCompleteController.kt
+            and ui/components/ShutdownCountdownDialog.kt; model/Models.kt +
+            data/SettingsRepository.kt persist shutdownAfterComplete (default
+            OFF); SettingsScreen.kt / AppNew.kt / viewmodel/AppViewModel.kt
+            wire the switch and the always-on countdown dialog. Self-authored
+            state machine: only arms after a task really ran, requires a
+            drained queue with no user-paused task, counts MERGING as busy,
+            cancels on new tasks / switch off / explicit cancel, and fires a
+            ONE-SHOT immediate shutdown when the in-app 60s countdown ends
+            (deliberately NOT a system-level scheduled shutdown that could
+            outlive a crashed app). No upstream UI or ViewModel was ported.
+
+        (4) Startup diagnostics / exit stability (upstream 3700c1c). main.kt
+            now logs diagnostic_session_start / diagnostic_session_end pairs,
+            read-only harvests hs_err_pid*.log / replay_pid*.log key lines
+            from the working dir and APP_DATA_DIR (does NOT move or delete
+            user files), and suppresses the native error dialog for
+            exceptions raised after shutdown begins.
+
+        jvmTest additions: HttpHeaderValuesTest, ChunkPlanTest,
+        DownloadEngineChunkPlanTest, ShutdownAfterCompleteControllerTest,
+        ShutdownStringsTest; SettingsRepositoryTest extended.
+        WebUploadServerTest was hardened against an unrelated flake (JDK
+        keep-alive connections cached by host:port can outlive a recycled
+        ephemeral test port); it now retries on SocketException with a fresh
+        connection, with no change to the server under test. All offline /
+        local-HTTP only — real OS shutdown permission and real cloud cookies
+        containing non-ASCII text were NOT verified on a real machine.
+        The in-app attribution (LicenseStrings.kt, N-09) still reports the
+        unchanged 56-file / 13,670-line upstream snapshot.
+
+  N-16  P2 capability batch + two real defects (2026-11-15) — closes the
+        remaining P2 rows of docs/UPSTREAM_SYNC_2026-11-15.md §3 and
+        docs/CLOUD_DRIVE_GAP.md 2.6 / 2.9. Again NO upstream source was
+        ported and NO AGPL-3.0 file was modified: the count stays at
+        56 files / 13,670 lines, the root LICENSE is untouched, and the
+        in-app attribution still reports the same snapshot. Every file
+        below is KtDownload-original work.
+
+        (0) Two real defects found while doing (1)-(3), fixed first because
+            they silently lose user data:
+            * Duplicate account stores. viewmodel/AppViewModel.kt built one
+              CloudDriveAccountStore for the shared-link pool and the
+              "My Drive" page built a second one; persist() writes a FULL
+              snapshot, so the two instances overwrote each other and
+              accounts vanished on restart. engine/clouddrive/
+              CloudDriveAccounts.kt now exposes a process-wide
+              CloudDriveAccountStore.shared, AppViewModel passes it into
+              both CloudDriveViewModel and MyDriveViewModel, and the default
+              constructor argument of both ViewModels points at the same
+              instance.
+            * "My Drive" pagination. 139 / 123 list APIs are cursor based;
+              viewmodel/MyDriveViewModel.kt only ever read page 1, so files
+              past the first page were invisible and unselectable.
+              nextCursor / loadMore() / hasMore were added, dedup is by
+              remote id, cursors reset on dir change / platform change /
+              account change, and the "move to folder" picker now aggregates
+              up to 20 pages (MOVE_FOLDER_MAX_PAGES). FileList shows
+              "load more" only when hasMore.
+
+        (1) Passphrase-encrypted account backup / restore (GAP 2.6). New
+            engine/clouddrive/CloudAccountBackup.kt: PBKDF2WithHmacSHA256
+            (16-byte salt, 210,000 iterations) -> AES-256-GCM (12-byte IV,
+            128-bit tag), AAD bound to the magic + format version + KDF +
+            iteration count, so downgrading the header fails the tag check
+            instead of silently weakening the file. Payload carries every
+            account of every platform with nickname, remark, primary flag
+            and credential; reimport MERGES (dedup by platform+credential,
+            id collisions get a fresh id, nothing is overwritten) via
+            CloudDriveAccountStore.mergeAll(). Wrong passphrase and
+            tampering both report "wrong passphrase or corrupted backup";
+            a newer format version or a foreign file is rejected outright.
+            Written to a .tmp then atomically replaced, mode 0600.
+
+        (2) One-click diagnostics bundle + crash artifacts (GAP 2.9). New
+            utils/DiagnosticBundle.kt builds kt-diagnostics-<ts>.zip with
+            manifest.txt / environment.txt / settings.txt / logs (last 7
+            days) / crash, NEVER credentials (account export is the only
+            path that carries them, and only encrypted, only on request),
+            never dumps environment variables, and redacts the home
+            directory to "~". New utils/CrashLogs.kt archives
+            hs_err_pid* / replay_pid* into <data>/logs/crash by COPYING
+            (source files are never moved or deleted) and is now what
+            main.kt calls at startup instead of its old inline scan.
+            ui/components/DataToolsSection.kt surfaces export / import /
+            diagnostics in Settings behind a masked passphrase dialog;
+            theme/DataToolsStrings.kt is a standalone zh/en table so
+            UiStrings keeps its distance from the JVM 255-parameter limit.
+
+        (3) Full share-expiry tiers (GAP §3 P2). MyDriveCapabilities gained
+            shareExpiryTiers (per-platform, empty = hide the picker) and
+            sharePasscode; MyDriveAdapters declares DEFAULT_SHARE_TIERS for
+            platforms that accept the neutral ShareExpire codes, PAN115's
+            own 101..105 scale for 115, and none at all for ILanzou (the
+            server decides). The ShareDialog now renders radios from the
+            platform's real tiers instead of a hardcoded 2-item list, and
+            hides the passcode field where the platform cannot use one.
+
+        (4) Deliberately NOT done: native Windows toast progress
+            notifications. They need WinRT via PowerShell or a JNA binding,
+            which cannot be verified on this macOS machine, and the existing
+            tray balloon is already wired. Recorded as a product boundary in
+            docs/CLOUD_DRIVE_GAP.md 2.8 rather than shipped untested.
+
+        jvmTest additions: CloudAccountBackupTest, MyDriveShareExpiryTest,
+        SharedAccountStoreTest, DiagnosticBundleTest, CrashLogsTest,
+        MyDrivePaginationTest, DataToolsStringsTest; MyDriveStringsTest
+        extended with every expiry code. All offline — no real account was
+        used to verify the new settings UI on a real machine.
+
+  N-17  Dangerous-path guard for recursive deletes (2026-11-15) — reviewed
+        upstream's "wiped the whole F: drive" incident (v1.3.3 storage-dir
+        migration plus startup cleanup of the old location). The v1.3.4
+        release notes describe the fix as: a cache/data directory set to a
+        drive root would move the entire drive, so migration now only moves
+        the app's own entries, and the startup cleanup refuses drive roots,
+        ancestors of the current data directory, and targets that contain
+        user files. NO upstream code was read into the build and NO
+        AGPL-3.0 file was modified: still 56 files / 13,670 lines, root
+        LICENSE untouched.
+
+        Downstream does NOT have the three upstream conditions: there is no
+        configurable storage/cache directory (AppSettings has only
+        downloadPath, which decides where files are written and is never
+        used to delete a directory), no directory migration (no
+        copyRecursively anywhere), and no startup cleanup of an "old data
+        directory". So the incident cannot happen here — but only because
+        those features were never built, not because the delete path was
+        ever guarded. This entry adds the guard so a future feature cannot
+        reintroduce it:
+
+        (1) New utils/SafeDelete.kt is the ONLY entry point for recursive
+            deletion. It refuses when: the target has no name / no parent
+            (drive root, "/", "C:"), the user home is inside the target,
+            the app data dir is inside the target, or the entry count
+            exceeds 50,000 (a real HLS playlist is a few thousand at most,
+            so a bigger number means the path was miscalculated). Paths are
+            compared after toRealPath(), so a symlink pointing at the home
+            directory is refused too. Missing targets are a silent no-op.
+
+        (2) All six recursive-delete sites now go through it: DownloadEngine
+            (cleanupHlsSegments / cancel / removeTask / post-mux cleanup, 4
+            sites), engine/hls/FfmpegMuxer.kt and
+            engine/web/browser/BrowserCapture.kt (Chromium temp profile,
+            previously a manual Files.walk in reverse order).
+            After the change, "deleteRecursively" appears in exactly one
+            place in jvmMain: SafeDelete.kt itself.
+
+        (3) hlsSegmentDir() no longer degenerates to a path relative to the
+            process CWD when the task target has no parent (F:\ or /):
+            File(null, ".hls") put segments somewhere unrelated to the task
+            and pointed later cleanup at the wrong place.
+
+        jvmTest additions: SafeDeleteTest (8 cases; the root-directory case
+        only asserts the verdict and deliberately never issues a real
+        recursive delete on a root), DownloadFileSupportTest extended with
+        the root-target fallback.
+
+Upstream disclaimer (docs/DISCLAIMER.md), summarised for downstream users:
+non-commercial study/research only; any paid copy is a scam; the app stores or
+distributes no copyrighted content and only resolves user-supplied share links
+(delete downloads within 24h); it is NOT affiliated with Quark / UC / Xunlei /
+Baidu / 139 / 123 / 115 / Lanzou and reverse-engineered APIs may break at any
+time; third-party clients can trigger platform account risk-control (especially
+Baidu); users must comply with local law and platform terms; supplied "as is"
+without warranty; use constitutes acceptance. Full text is in the upstream
+repository and in THIRD-PARTY-NOTICES.md.
+
+IMPORTANT — license obligations
+--------------------------------
+AGPL-3.0 is a strong network copyleft. Because the resolver is compiled into the
+same application, the whole KtDownload program is a derivative work and, when
+distributed (or, for a network-service build, offered over a network), must be
+licensed under AGPL-3.0 with its complete Corresponding Source made available.
+The project root LICENSE (MIT) is therefore NOT sufficient for distributions
+that include this module. Either relicense the whole program under AGPL-3.0, or
+isolate the resolver into a separate AGPL-licensed process with an arm-length
+protocol, after obtaining legal review.
+OWNER DECISION (2026-11-14): the root LICENSE stays MIT for now and the
+provenance record is being completed, but the conflict itself is NOT resolved.
+Do not publish a binary built from this branch until that decision is made;
+see THIRD-PARTY-NOTICES.md §YunX for the outstanding TODO.
+
+Ported source files (from upstream, 56 total; 47 in the original snapshot
++ StarSeaApi.kt / StarSeaConstants.kt added in batch 1 on 2026-11-14, see N-06
++ 7 GitHub*.kt files added in batch 2 on 2026-11-14, see N-07):
+
+  top/mcly99/dl/data/network/BaiduApi.kt
+  top/mcly99/dl/data/network/BaiduApiException.kt
+  top/mcly99/dl/data/network/BaiduConstants.kt
+  top/mcly99/dl/data/network/C139Api.kt
+  top/mcly99/dl/data/network/C139Constants.kt
+  top/mcly99/dl/data/network/DiagnosticNetworkInterceptor.kt
+  top/mcly99/dl/data/network/GitHubApi.kt                 (N-07, batch 2)
+  top/mcly99/dl/data/network/GitHubCommitDateCache.kt   (N-07, batch 2)
+  top/mcly99/dl/data/network/GitHubLinkParser.kt        (N-07, batch 2)
+  top/mcly99/dl/data/network/GitHubMirror.kt            (N-07, batch 2, adapted)
+  top/mcly99/dl/data/network/GitHubModels.kt            (N-07, batch 2)
+  top/mcly99/dl/data/network/GitHubResponseCache.kt     (N-07, batch 2)
+  top/mcly99/dl/data/network/GitHubTokenStore.kt        (N-07, batch 2, adapted)
+  top/mcly99/dl/data/network/GuangYaApi.kt
+  top/mcly99/dl/data/network/GuangYaConstants.kt
+  top/mcly99/dl/data/network/HttpClients.kt
+  top/mcly99/dl/data/network/ILanzouApi.kt
+  top/mcly99/dl/data/network/ILanzouConstants.kt
+  top/mcly99/dl/data/network/LanzouApi.kt
+  top/mcly99/dl/data/network/LanzouConstants.kt
+  top/mcly99/dl/data/network/LanzouCrypto.kt
+  top/mcly99/dl/data/network/Pan115Api.kt
+  top/mcly99/dl/data/network/Pan115Constants.kt
+  top/mcly99/dl/data/network/Pan115Crypto.kt
+  top/mcly99/dl/data/network/Pan123Api.kt
+  top/mcly99/dl/data/network/Pan123Constants.kt
+  top/mcly99/dl/data/network/Pan123DeviceId.kt
+  top/mcly99/dl/data/network/Pan123LoginSupport.kt
+  top/mcly99/dl/data/network/QuarkApi.kt
+  top/mcly99/dl/data/network/QuarkApiException.kt
+  top/mcly99/dl/data/network/QuarkCdn.kt
+  top/mcly99/dl/data/network/QuarkConstants.kt
+  top/mcly99/dl/data/network/ShareLinkParser.kt
+  top/mcly99/dl/data/network/StarSeaApi.kt        (N-06, batch 1)
+  top/mcly99/dl/data/network/StarSeaConstants.kt  (N-06, batch 1)
+  top/mcly99/dl/data/network/UCApi.kt
+  top/mcly99/dl/data/network/UCConstants.kt
+  top/mcly99/dl/data/network/XunleiApi.kt
+  top/mcly99/dl/data/network/XunleiConstants.kt
+  top/mcly99/dl/data/network/XunleiDeviceFingerprint.kt
+  top/mcly99/dl/data/network/XunleiKouling.kt
+  top/mcly99/dl/data/network/XunleiWebCredential.kt
+  top/mcly99/dl/data/network/model/ShareExpire.kt
+  top/mcly99/dl/data/network/model/ShareModels.kt
+  top/mcly99/dl/data/repository/BaiduResolveRepository.kt
+  top/mcly99/dl/data/repository/C139ResolveRepository.kt
+  top/mcly99/dl/data/repository/GuangYaResolveRepository.kt
+  top/mcly99/dl/data/repository/ILanzouResolveRepository.kt
+  top/mcly99/dl/data/repository/LanzouResolveRepository.kt
+  top/mcly99/dl/data/repository/Pan115ResolveRepository.kt
+  top/mcly99/dl/data/repository/Pan123ResolveRepository.kt
+  top/mcly99/dl/data/repository/QuarkResolveRepository.kt
+  top/mcly99/dl/data/repository/ShareResolveRepository.kt
+  top/mcly99/dl/data/repository/TransferSpaceGuard.kt
+  top/mcly99/dl/data/repository/UCResolveRepository.kt
+  top/mcly99/dl/data/repository/XunleiResolveRepository.kt
+
+Compatibility shims written for KtDownload (not upstream code):
+  top/mcly99/dl/data/AppContext.kt
+  top/mcly99/dl/utils/Log.kt
+  top/mcly99/dl/data/db/XunleiAccountEntity.kt
+  top/mcly99/dl/data/repository/ILanzouAccountRepository.kt
+
