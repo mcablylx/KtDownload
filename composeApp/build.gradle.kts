@@ -137,6 +137,12 @@ tasks.matching { it.name == "compileKotlinJvm" || it.name == "compileKotlinCommo
 compose.desktop {
     application {
         mainClass = "top.mcly99.dl.MainKt"
+
+        // release 构建默认开启 ProGuard，必须显式接入规则文件：
+        // 否则 -dontwarn / -keep 等规则不生效，桌面端用不到的可选依赖警告会让打包失败。
+        buildTypes.release.proguard {
+            configurationFiles.from(file("proguard-rules.pro"))
+        }
         // vlcj 通过 DirectByteBuffer 读 native 缓冲，JDK 17+ 需要显式开放 java.nio
         // jcefModuleArgs 供内嵌浏览器访问 JDK 内部包（见文件头注释）
         jvmArgs += listOf("--enable-native-access=ALL-UNNAMED", "--add-opens=java.base/java.nio=ALL-UNNAMED") + jcefModuleArgs
