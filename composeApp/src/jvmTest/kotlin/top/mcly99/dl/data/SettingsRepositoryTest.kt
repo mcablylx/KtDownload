@@ -169,4 +169,20 @@ class SettingsRepositoryTest {
         val props = Properties().apply { setProperty("shutdownAfterComplete", "YES") }
         assertFalse(SettingsRepository.fromProperties(props).shutdownAfterComplete)
     }
+
+    // ------------------------------------------------ 自动检查更新
+
+    @Test
+    fun auto_check_update_is_on_by_default_and_round_trips() {
+        assertTrue(SettingsRepository.fromProperties(Properties()).autoCheckUpdate)
+        val saved = SettingsRepository.toProperties(AppSettings(autoCheckUpdate = false))
+        assertEquals("false", saved.getProperty("autoCheckUpdate"))
+        assertFalse(SettingsRepository.fromProperties(saved).autoCheckUpdate)
+    }
+
+    @Test
+    fun malformed_auto_check_flag_falls_back_to_default() {
+        val props = Properties().apply { setProperty("autoCheckUpdate", "YES") }
+        assertTrue(SettingsRepository.fromProperties(props).autoCheckUpdate)
+    }
 }

@@ -63,7 +63,9 @@ data class GitHubRelease(
     /** 是否预发布（prerelease=true） */
     val prerelease: Boolean = false,
     /** 是否草稿（draft=true，不可公开下载） */
-    val draft: Boolean = false
+    val draft: Boolean = false,
+    /** Release 正文（Markdown 原文），用于「发现新版本」弹窗展示更新说明 */
+    val body: String? = null,
 )
 
 /** GitHub Release 资产（可下载文件） */

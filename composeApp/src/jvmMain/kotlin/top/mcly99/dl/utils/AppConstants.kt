@@ -163,6 +163,9 @@ object AppConstants {
 
     /** 应用内一次性提示的停留时间：够读完一句「已清理 XX MB」，又不至于挡住操作 */
     const val TOAST_VISIBLE_MS = 3_000L
+
+    /** 启动后延迟多久做后台更新检查：避开启动高峰，窗口已可见再检查 */
+    const val UPDATE_CHECK_STARTUP_DELAY_MS = 5_000L
     const val TRANSFER_REFRESH_INTERVAL_MS = 1_000L
     const val PORT_INPUT_REVERT_MS = 3_000L
     const val COPY_FEEDBACK_MS = 1_500L

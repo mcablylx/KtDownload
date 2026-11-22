@@ -16,8 +16,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.mcly99.dl.data.SettingsRepository
+import top.mcly99.dl.data.network.GitHubApi
 import top.mcly99.dl.data.network.GitHubMirror
 import top.mcly99.dl.data.network.HttpClients
+import top.mcly99.dl.data.network.UpdateCancelled
+import top.mcly99.dl.data.network.UpdateChecker
+import top.mcly99.dl.data.network.UpdateDownloader
+import top.mcly99.dl.data.network.UpdateInfo
+import top.mcly99.dl.data.network.UpdateInstaller
 import top.mcly99.dl.engine.extractFileName
 import top.mcly99.dl.engine.resolveProxy
 import top.mcly99.dl.engine.sanitizeDownloadFileName
@@ -47,7 +53,9 @@ import top.mcly99.dl.theme.transferExtraStrings
 import top.mcly99.dl.theme.stringsFor
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.HostPlatform
 import top.mcly99.dl.utils.formatBytes
+import top.mcly99.dl.APP_VERSION
 import top.mcly99.dl.utils.getClipboardUrl
 import top.mcly99.dl.utils.isSelfCopied
 import java.net.Proxy
@@ -114,6 +122,38 @@ class AppViewModel {
 
     var settings by mutableStateOf(loadInitialSettings())
         private set
+
+    // ---------- 自动更新 ----------
+
+    private val updateChecker = UpdateChecker.fromApi(GitHubApi())
+    private val updateDownloader = UpdateDownloader()
+
+    /** 发现新版本时填充，驱动「发现新版本」对话框；null 表示不显示。 */
+    var updateInfo by mutableStateOf<UpdateInfo?>(null)
+        private set
+
+    /** 是否正在下载更新包。 */
+    var updateDownloading by mutableStateOf(false)
+        private set
+
+    /** 下载进度 0..100。 */
+    var updateProgress by mutableStateOf(0)
+        private set
+
+    /** 检查更新的一次性状态（UI 层映射成文案）。 */
+    var updateStatus by mutableStateOf<UpdateStatus?>(null)
+        private set
+
+    enum class UpdateStatus { CHECKING, UP_TO_DATE, DOWNLOAD_FAILED, OPEN_FAILED }
+
+    private var updateStatusJob: Job? = null
+
+    /** 侧边栏版本处是否显示「有新版本」角标。 */
+    var updateAvailable by mutableStateOf(false)
+        private set
+
+    /** 由 AppNew 注入的退出应用回调（Windows 启动安装器后需要干净退出）。 */
+    var onExit: () -> Unit = {}
 
     /**
      * 所有网络链路共用的代理来源：三态（直连 / 手动 / 跟随系统）只在请求发生时解析，
@@ -630,8 +670,93 @@ class AppViewModel {
 
     fun openLogDirectory(): Boolean = AppLogger.openLogDirectory()
 
+    // ---------- 自动更新逻辑 ----------
+
+    /**
+     * 检查更新。
+     *
+     * @param silent true 表示启动时的后台静默检查：不弹「已是最新」提示，
+     *   只在发现新版本时显示对话框与侧边栏角标；false 表示用户手动点击，任何结果都给反馈。
+     */
+    fun checkForUpdate(silent: Boolean = false) {
+        if (updateDownloading) return
+        scope.launch {
+            if (!silent) showUpdateStatus(UpdateStatus.CHECKING)
+            val info = runCatching { updateChecker.check(APP_VERSION) }
+                .onFailure { AppLogger.warn("Update", "检查更新失败: ${it.message}", it) }
+                .getOrNull()
+            if (info != null) {
+                updateInfo = info
+                updateAvailable = true
+                if (!silent) clearUpdateStatus() // 弹窗接管提示，避免停留在「正在检查…」
+            } else if (!silent) {
+                showUpdateStatus(UpdateStatus.UP_TO_DATE)
+            }
+        }
+    }
+
+    /** 下载并安装当前 [updateInfo] 对应的安装包。 */
+    fun downloadAndInstall() {
+        val info = updateInfo ?: return
+        if (updateDownloading) return
+        updateDownloading = true
+        updateProgress = 0
+        scope.launch {
+            try {
+                val file = updateDownloader.download(info.asset, onProgress = { p ->
+                    updateProgress = p.percent
+                })
+                AppLogger.info("Update", "下载完成，准备打开: ${file.fileName}")
+                updateInfo = null
+                updateDownloading = false
+                val ok = UpdateInstaller.open(file, HostPlatform.current(), onExit)
+                if (!ok) showUpdateStatus(UpdateStatus.OPEN_FAILED)
+            } catch (e: UpdateCancelled) {
+                AppLogger.info("Update", "用户取消下载")
+                updateDownloading = false
+            } catch (e: Exception) {
+                AppLogger.warn("Update", "下载更新失败: ${e.message}", e)
+                updateDownloading = false
+                showUpdateStatus(UpdateStatus.DOWNLOAD_FAILED)
+            }
+        }
+    }
+
+    /** 用户点「稍后」：关闭对话框但保留角标，下次启动仍会提示。 */
+    fun dismissUpdateDialog() {
+        updateInfo = null
+    }
+
+    /** 取消正在进行的下载。 */
+    fun cancelUpdateDownload() {
+        updateDownloader.cancel()
+    }
+
+    fun clearUpdateStatus() {
+        updateStatus = null
+    }
+
+    private fun showUpdateStatus(status: UpdateStatus) {
+        updateStatusJob?.cancel()
+        updateStatus = status
+        updateStatusJob = scope.launch {
+            delay(AppConstants.TOAST_VISIBLE_MS)
+            updateStatus = null
+        }
+    }
+
+    /** 启动时调用：尊重设置开关，延迟几秒后台静默检查。 */
+    fun startAutoUpdateCheckIfEnabled() {
+        if (!settings.autoCheckUpdate) return
+        scope.launch {
+            delay(AppConstants.UPDATE_CHECK_STARTUP_DELAY_MS)
+            checkForUpdate(silent = true)
+        }
+    }
+
     fun shutdown() {
         // 界面销毁时把最后一次设置同步落盘，避免 debounce 中的修改丢失
+        updateDownloader.cancel()
         runCatching { SettingsRepository.save(settings) }
         catchWeb.shutdown()
         cloudDrive.shutdown()

@@ -54,6 +54,8 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Notifications
@@ -103,6 +105,7 @@ import top.mcly99.dl.theme.dataToolsStrings
 import top.mcly99.dl.theme.multiAccountStrings
 import top.mcly99.dl.theme.networkStrings
 import top.mcly99.dl.theme.shutdownStrings
+import top.mcly99.dl.theme.updateStrings
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
 import top.mcly99.dl.utils.FfmpegLocator
@@ -114,6 +117,12 @@ import top.mcly99.dl.utils.formatBytes
 fun SettingsScreen(
     settings: AppSettings,
     onUpdate: (AppSettings) -> Unit,
+    /**
+     * 手动触发检查更新；由 AppViewModel 处理。传 null 时（如预览）不显示该卡片。
+     */
+    onCheckUpdate: (() -> Unit)? = null,
+    /** 检查更新的一次性提示文案（正在检查 / 已是最新 等），null 表示无提示。 */
+    updateStatusText: String? = null,
     modifier: Modifier = Modifier,
     /**
      * 账号池：用于「导出/导入账号备份」与诊断包的账号计数。
@@ -127,6 +136,7 @@ fun SettingsScreen(
     val e = multiAccountStrings(settings.language)
     val sd = shutdownStrings(settings.language)
     val dt = dataToolsStrings(settings.language)
+    val u = updateStrings(settings.language)
     var showLicenses by remember { mutableStateOf(false) }
 
     // ffmpeg 探测会启动子进程，放到 IO 线程，避免打开设置页时卡顿
@@ -156,6 +166,28 @@ fun SettingsScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
+            if (onCheckUpdate != null) {
+                SettingsCard(
+                    title = u.sectionTitle,
+                    description = u.sectionDesc,
+                    leading = { Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = FlowDownColors.Primary, modifier = Modifier.size(20.dp)) },
+                ) {
+                    SwitchRow(u.autoCheck, u.autoCheckDesc, settings.autoCheckUpdate) {
+                        onUpdate(settings.copy(autoCheckUpdate = it))
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    CompactButton(
+                        text = u.checkNow,
+                        onClick = onCheckUpdate,
+                        icon = Icons.Default.Update,
+                    )
+                    if (updateStatusText != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(updateStatusText, style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
+                    }
+                }
+            }
+
             SettingsCard(
                 title = s.downloadSettings,
                 description = s.downloadSettingsDesc,

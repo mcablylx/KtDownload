@@ -29,6 +29,8 @@ import top.mcly99.dl.theme.LocalStrings
 import top.mcly99.dl.theme.myDriveStrings
 import top.mcly99.dl.theme.removeTaskStrings
 import top.mcly99.dl.theme.shutdownStrings
+import top.mcly99.dl.theme.updateStrings
+import top.mcly99.dl.utils.AppLogger
 import top.mcly99.dl.ui.components.AddTaskDialog
 import top.mcly99.dl.ui.components.CatchWebHeaderState
 import top.mcly99.dl.ui.components.CatchWebScreen
@@ -48,6 +50,7 @@ import top.mcly99.dl.ui.components.StatusFooter
 import top.mcly99.dl.ui.components.TaskListPanel
 import top.mcly99.dl.ui.components.ToastBar
 import top.mcly99.dl.ui.components.TransferScreen
+import top.mcly99.dl.ui.components.UpdateDialog
 import top.mcly99.dl.viewmodel.AppViewModel
 import top.mcly99.dl.viewmodel.LinkPicker
 
@@ -61,12 +64,14 @@ import top.mcly99.dl.viewmodel.LinkPicker
 fun AppNew(
     onMinimizeToTrayChange: (Boolean) -> Unit = {},
     onNotification: (String, String) -> Unit = { _, _ -> },
+    onExit: () -> Unit = {},
 ) {
     val viewModel = remember { AppViewModel() }
 
     SideEffect {
         // 每次重组都同步最新回调，避免 remember 捕获旧 lambda
         viewModel.onNotification = onNotification
+        viewModel.onExit = onExit
     }
 
     DisposableEffect(Unit) {
@@ -79,6 +84,21 @@ fun AppNew(
     val myDrive = myDriveStrings(settings.language)
     val shutdownText = shutdownStrings(settings.language)
     val removeTaskText = removeTaskStrings(settings.language)
+    val updateText = updateStrings(settings.language)
+
+    // 启动后延迟做一次后台更新检查（开关在 VM 内判断），只在发现新版本时打扰用户
+    LaunchedEffect(Unit) {
+        viewModel.startAutoUpdateCheckIfEnabled()
+    }
+
+    // 把 VM 的更新状态枚举映射成当前语言的文案
+    val updateStatusText = when (viewModel.updateStatus) {
+        AppViewModel.UpdateStatus.CHECKING -> updateText.checking
+        AppViewModel.UpdateStatus.UP_TO_DATE -> updateText.upToDate
+        AppViewModel.UpdateStatus.DOWNLOAD_FAILED -> updateText.downloadFailed
+        AppViewModel.UpdateStatus.OPEN_FAILED -> updateText.openFailed
+        null -> null
+    }
 
     // 「全部删除」确认框的开关：放 UI 层而不是 VM，弹窗只是瞬时交互状态，不需要持久化
     var clearAllConfirmOpen by remember { mutableStateOf(false) }
@@ -130,6 +150,7 @@ fun AppNew(
                             completed = viewModel.completedTaskCount,
                         ),
                         myDriveLabel = myDrive.title,
+                        updateAvailable = viewModel.updateAvailable,
                     )
 
                     Column(Modifier.weight(1f).fillMaxHeight()) {
@@ -202,6 +223,8 @@ fun AppNew(
                                 ViewType.Settings -> SettingsScreen(
                                     settings = settings,
                                     onUpdate = viewModel::updateSettings,
+                                    onCheckUpdate = { viewModel.checkForUpdate(silent = false) },
+                                    updateStatusText = updateStatusText,
                                     accountStore = viewModel.myDriveAccounts,
                                     modifier = Modifier.fillMaxSize(),
                                 )
@@ -311,6 +334,26 @@ fun AppNew(
                     strings = shutdownText,
                     onCancel = viewModel.shutdownAfterComplete::cancel,
                     onShutdownNow = viewModel.shutdownAfterComplete::shutdownNow,
+                )
+
+                // 发现新版本：展示版本号与 Release 说明，下载时显示进度
+                UpdateDialog(
+                    open = viewModel.updateInfo != null,
+                    info = viewModel.updateInfo,
+                    strings = updateText,
+                    downloading = viewModel.updateDownloading,
+                    progress = viewModel.updateProgress,
+                    onUpdate = viewModel::downloadAndInstall,
+                    onLater = viewModel::dismissUpdateDialog,
+                    onOpenRelease = {
+                        viewModel.updateInfo?.releaseUrl?.let { url ->
+                            runCatching {
+                                java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                            }.onFailure { e ->
+                                AppLogger.warn("Update", "打开 Release 页面失败: ${e.message}", e)
+                            }
+                        }
+                    },
                 )
             }
         }

@@ -105,6 +105,23 @@ class GitHubApi(
             }.getOrNull()
         }
 
+    /**
+     * 最新正式 Release：GET /repos/{owner}/{repo}/releases/latest。
+     *
+     * 该端点由 GitHub 自动排除 draft 与 prerelease，正适合更新检查。
+     * 结果经统一缓存（成功 10 分钟 / 失败 1 分钟），失败返回 null，调用方据此静默跳过。
+     */
+    suspend fun getLatestRelease(owner: String, repo: String): GitHubRelease? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val raw = cachedBody(
+                    "latest-release:$owner/$repo:${tokenFingerprint()}",
+                    "https://api.github.com/repos/$owner/$repo/releases/latest"
+                ) ?: return@withContext null
+                parseRelease(JSONObject(raw))
+            }.getOrNull()
+        }
+
     /** 用户公开仓库列表（分页）：GET /users/{owner}/repos?sort=updated（带 Token 指纹 key，结果经缓存） */
     suspend fun getUserRepos(owner: String, page: Int = 1): List<GitHubRepo>? =
         withContext(Dispatchers.IO) {
@@ -297,7 +314,8 @@ class GitHubApi(
             publishedAt = o.optString("published_at").ifBlank { null },
             assets = assets,
             prerelease = o.optBoolean("prerelease", false),
-            draft = o.optBoolean("draft", false)
+            draft = o.optBoolean("draft", false),
+            body = o.optString("body").ifBlank { null },
         )
     }
 

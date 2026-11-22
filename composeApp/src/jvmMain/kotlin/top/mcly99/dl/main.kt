@@ -289,6 +289,7 @@ private fun runUi() {
             window.minimumSize = Dimension(900, 700)
             AppNew(
                 onMinimizeToTrayChange = { minimizeToTray = it },
+                onExit = { exitApplication() },
                 onNotification = { title, message ->
                     try {
                         TrayHelper.notify(title, message)

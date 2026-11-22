@@ -70,6 +70,8 @@ fun SidebarPanel(
     stats: SidebarStats,
     /** P4「我的网盘」标题：独立文案表，刻意不给 UiStrings 增加构造槽位 */
     myDriveLabel: String = "我的网盘",
+    /** 有新版本可用时在版本号旁显示角标 */
+    updateAvailable: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val s = Strings.current
@@ -184,7 +186,17 @@ fun SidebarPanel(
 //                .border(width = 1.dp, color = FlowDownColors.SidebarBorder)
                 .padding(16.dp),
         ) {
-            Text(s.version(APP_VERSION), style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Text(s.version(APP_VERSION), style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
+                if (updateAvailable) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(FlowDownColors.Primary, CircleShape)
+                    )
+                }
+            }
         }
     }
 }

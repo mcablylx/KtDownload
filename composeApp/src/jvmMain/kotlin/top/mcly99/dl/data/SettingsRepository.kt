@@ -54,6 +54,8 @@ object SettingsRepository {
     private const val KEY_KEEP_HLS_SEGMENTS = "keepHlsSegments"
     private const val KEY_PROBE_MEDIA_SIZE = "probeMediaSize"
     private const val KEY_DEEP_CATCH = "deepCatchEnabled"
+    /** 自动检查更新：默认开，旧配置没有此键时按开启处理 */
+    private const val KEY_AUTO_CHECK_UPDATE = "autoCheckUpdate"
 
     /**
      * 读取设置；文件不存在或损坏时返回默认值。
@@ -132,6 +134,7 @@ object SettingsRepository {
         keepHlsSegments = props.boolOr(KEY_KEEP_HLS_SEGMENTS, defaults.keepHlsSegments),
         probeMediaSize = props.boolOr(KEY_PROBE_MEDIA_SIZE, defaults.probeMediaSize),
         deepCatchEnabled = props.boolOr(KEY_DEEP_CATCH, defaults.deepCatchEnabled),
+        autoCheckUpdate = props.boolOr(KEY_AUTO_CHECK_UPDATE, defaults.autoCheckUpdate),
     )
     }
 
@@ -161,6 +164,7 @@ object SettingsRepository {
         setProperty(KEY_KEEP_HLS_SEGMENTS, settings.keepHlsSegments.toString())
         setProperty(KEY_PROBE_MEDIA_SIZE, settings.probeMediaSize.toString())
         setProperty(KEY_DEEP_CATCH, settings.deepCatchEnabled.toString())
+        setProperty(KEY_AUTO_CHECK_UPDATE, settings.autoCheckUpdate.toString())
     }
 
     private fun Properties.prop(key: String): String? = getProperty(key)

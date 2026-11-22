@@ -181,4 +181,9 @@ data class AppSettings(
      * 开启后，静态抓取拿不到地址的站点（播放器完全由 JavaScript 构建）才有机会抓到。
      */
     val deepCatchEnabled: Boolean = false,
+    /**
+     * 自动检查更新：默认开。启动时后台静默检查 GitHub 上的最新 Release，
+     * 有新版本时在侧边栏版本处显示角标；检查失败完全静默，不影响使用。
+     */
+    val autoCheckUpdate: Boolean = true,
 )
