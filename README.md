@@ -160,7 +160,7 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 | Gradle | 使用仓库内的 Gradle Wrapper（8.14.5） |
 | 操作系统 | Windows 10/11 x64、macOS 10.15+、Linux 桌面 |
 | 内存 | 建议 4 GB 以上，构建 JVM 参数 `-Xmx3072M` |
-| 网络 | 首次构建需访问 Google Maven / Maven Central；打包还需下载 libvlc 与 UPX |
+| 网络 | 首次构建需访问 Google Maven / Maven Central；打包还需下载 libvlc、UPX 与 FFmpeg（均可预先离线预置，见下） |
 
 > 若 IDE 报 Gradle JVM 版本不兼容，请在 IDE 的 Gradle 设置中选择 JDK 21。命令行构建使用仓库固定的 21 守护进程配置。
 
@@ -183,7 +183,33 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 ./gradlew :composeApp:packageReleaseDistributionForCurrentOS
 ```
 
-Windows 打包 EXE / MSI 需安装 WiX Toolset 3。macOS 打包需在本机完成 FFmpeg 准备与 ad-hoc 签名。
+### Windows 打包与 FFmpeg（含离线构建）
+
+Windows 打包 EXE / MSI 需安装 WiX Toolset 3。随包分发的 FFmpeg 二进制因体积（134 MB）超过 GitHub 单文件 100 MB 限制，**不入 Git 仓库**，由 `scripts/fetch-ffmpeg.ps1` 自动获取并做 SHA-256 校验。运行 `package-installer.bat` 会自动执行该脚本，也可单独运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
+```
+
+获取优先级（命中即校验，全部失败才报错）：
+
+1. 已存在且校验通过的 `resources/windows/ffmpeg/ffmpeg.exe` —— 完全离线
+2. 环境变量 `KTDOWNLOAD_FFMPEG_ZIP` 指向的本地 zip —— 完全离线
+3. `%GRADLE_USER_HOME%\vlcSetup\` 下的缓存 zip（与 libvlc/UPX 离线包同目录）—— 完全离线
+4. 本项目 GitHub Release（tag `ffmpeg`）下载的 zip
+5. 上游 FFmpeg-Builds（兜底，上游会删旧 tag，不保证长期可用）
+
+**完全离线打包**：把以下 3 个压缩包预置到 `%GRADLE_USER_HOME%\vlcSetup\`（默认 `C:\Users\<用户>\.gradle\vlcSetup\`），即可在断网环境构建 Windows 包：
+
+| 文件 | 用途 |
+| --- | --- |
+| `ffmpeg-n8.1.3-24-g92611900bb-win64-lgpl-8.1.zip` | FFmpeg（解压出 ffmpeg.exe） |
+| `vlc-3.0.21.zip` | libvlc 播放内核 |
+| `upx-4.2.4.zip` | UPX 压缩工具 |
+
+单个包也可通过 `KTDOWNLOAD_FFMPEG_ZIP` 环境变量单独指定。若需更新 FFmpeg 版本，必须同时更新脚本里的 `$AssetName`、`$ExpectedSha256` 以及 `third-party/ffmpeg/SOURCE.txt`。
+
+macOS 打包需在本机用 `scripts/fetch-ffmpeg-macos.sh` 编译 FFmpeg 并完成 ad-hoc 签名。
 
 ### 离线打包（无需下载 FFmpeg / libvlc）
 
