@@ -31,3 +31,6 @@ local.properties
 # 工作记录（非项目源码）
 .workbuddy/
 .kotlin/
+
+# 代码走查 / 评审文档：仅本地留存，不入仓库
+docs/
