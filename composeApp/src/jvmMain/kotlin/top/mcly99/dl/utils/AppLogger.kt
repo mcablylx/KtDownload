@@ -67,6 +67,8 @@ object AppLogger {
  *
  * 只处理符合命名规则的文件，其他内容一律不动；目录不存在时直接返回。
  */
+internal val APP_LOG_NAME = Regex("""app-\d{4}-\d{2}-\d{2}\.log""")
+
 internal fun pruneOldLogs(
     directory: Path,
     today: LocalDate = LocalDate.now(),
@@ -78,7 +80,7 @@ internal fun pruneOldLogs(
         Files.list(directory).use { paths ->
             paths.filter { path ->
                 val name = path.fileName.toString()
-                if (!name.matches(Regex("""app-\d{4}-\d{2}-\d{2}\.log"""))) return@filter false
+                if (!APP_LOG_NAME.matches(name)) return@filter false
                 val date = runCatching {
                     LocalDate.parse(name.removePrefix("app-").removeSuffix(".log"))
                 }.getOrNull()

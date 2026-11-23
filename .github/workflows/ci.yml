@@ -1,0 +1,52 @@
+name: CI
+
+# P3-T1：此前 900 个单测只在本地手动跑，团队层面拿不到回归信号。
+# 这里在 push / PR 上跑一次 JVM 单测，失败时把报告作为 artifact 捞回来。
+
+on:
+  push:
+    branches: [ main, master, check_01 ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  jvm-test:
+    # 单测是纯 JVM（Compose Desktop 不需要显示器），Linux 上最快也最便宜。
+    # 构建脚本按构建机平台选择 jcefmaven / vlcj 的 natives，Linux amd64 有对应产物。
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 本项目 configuration cache 有序列化问题，所有命令都必须带 --no-configuration-cache
+      - name: Run JVM unit tests
+        run: ./gradlew :composeApp:jvmTest --no-configuration-cache --console=plain
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvmtest-report
+          path: |
+            composeApp/build/reports/tests/jvmTest
+            composeApp/build/test-results/jvmTest
+          if-no-files-found: ignore
+          retention-days: 14

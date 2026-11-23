@@ -355,17 +355,24 @@ private fun TypeChip(type: TaskType) {
     }
 }
 
+/** 扩展名分组：每次重组都会用到，放顶层常量避免反复构造 list（D 延伸） */
+private val VIDEO_EXTENSIONS = setOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm")
+private val AUDIO_EXTENSIONS = setOf("mp3", "wav", "flac", "aac", "ogg", "m4a")
+private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg")
+private val ARCHIVE_EXTENSIONS = setOf("zip", "rar", "7z", "tar", "gz")
+private val DOC_EXTENSIONS = setOf("pdf", "doc", "docx", "txt")
+
 private fun fileIcon(task: UiTask): ImageVector = when (task.type) {
     TaskType.Bt -> Icons.Default.Link
     TaskType.M3u8 -> Icons.Default.Movie
     else -> {
         val ext = task.name.substringAfterLast('.', "").lowercase()
         when (ext) {
-            in listOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm") -> Icons.Default.VideoFile
-            in listOf("mp3", "wav", "flac", "aac", "ogg", "m4a") -> Icons.Default.AudioFile
-            in listOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg") -> Icons.Default.Image
-            in listOf("zip", "rar", "7z", "tar", "gz") -> Icons.Default.FolderZip
-            in listOf("pdf", "doc", "docx", "txt") -> Icons.Default.Description
+            in VIDEO_EXTENSIONS -> Icons.Default.VideoFile
+            in AUDIO_EXTENSIONS -> Icons.Default.AudioFile
+            in IMAGE_EXTENSIONS -> Icons.Default.Image
+            in ARCHIVE_EXTENSIONS -> Icons.Default.FolderZip
+            in DOC_EXTENSIONS -> Icons.Default.Description
             else -> Icons.AutoMirrored.Filled.InsertDriveFile
         }
     }
@@ -378,11 +385,11 @@ private fun fileIconTint(task: UiTask): Color = when (task.type) {
     else -> {
         val ext = task.name.substringAfterLast('.', "").lowercase()
         when {
-            ext in listOf("mp4", "mkv", "avi", "mov", "wmv", "flv", "webm") -> FlowDownColors.Blue
-            ext in listOf("mp3", "wav", "flac", "aac", "ogg", "m4a") -> FlowDownColors.Green
-            ext in listOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg") -> FlowDownColors.Pink
-            ext in listOf("zip", "rar", "7z", "tar", "gz") -> FlowDownColors.Yellow
-            ext in listOf("pdf", "doc", "docx", "txt") -> FlowDownColors.Red
+            ext in VIDEO_EXTENSIONS -> FlowDownColors.Blue
+            ext in AUDIO_EXTENSIONS -> FlowDownColors.Green
+            ext in IMAGE_EXTENSIONS -> FlowDownColors.Pink
+            ext in ARCHIVE_EXTENSIONS -> FlowDownColors.Yellow
+            ext in DOC_EXTENSIONS -> FlowDownColors.Red
             else -> FlowDownColors.MutedForeground
         }
     }

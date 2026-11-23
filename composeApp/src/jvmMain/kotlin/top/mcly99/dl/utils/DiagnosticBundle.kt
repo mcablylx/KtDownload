@@ -173,7 +173,7 @@ object DiagnosticBundle {
     }
 
     private fun parseLogDate(name: String): LocalDate? {
-        if (!name.matches(Regex("""app-\d{4}-\d{2}-\d{2}\.log"""))) return null
+        if (!APP_LOG_NAME.matches(name)) return null
         return runCatching {
             LocalDate.parse(name.removePrefix("app-").removeSuffix(".log"))
         }.getOrNull()

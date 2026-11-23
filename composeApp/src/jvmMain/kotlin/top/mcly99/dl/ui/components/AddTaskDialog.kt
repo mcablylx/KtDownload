@@ -1,5 +1,6 @@
 package top.mcly99.dl.ui.components
 
+import top.mcly99.dl.utils.AppConstants
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -224,7 +225,8 @@ fun AddTaskDialog(
 private fun ThreadsDropdown(value: String, onSelect: (String) -> Unit) {
     val s = Strings.current
     var menuOpen by remember { mutableStateOf(false) }
-    val options = listOf("1", "2", "4", "8", "16", "32")
+    // 与引擎上限保持一致：只到 32 时，设置页设成 64 的用户在这里选不回去（D 延伸）
+    val options = (listOf(1, 2, 4, 8, 16, 32) + AppConstants.MAX_THREADS).distinct().map { it.toString() }
     Box {
         OutlinedButton(onClick = { menuOpen = true }, modifier = Modifier.fillMaxWidth()) {
             Text(s.threadsLabel(value.toIntOrNull() ?: 0))

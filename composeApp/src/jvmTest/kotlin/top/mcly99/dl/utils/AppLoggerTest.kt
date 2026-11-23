@@ -33,10 +33,23 @@ class AppLoggerTest {
     }
 
     @Test
-    fun pruning_missing_directory_is_a_noop() {
-        pruneOldLogs(
-            directory = java.nio.file.Paths.get("build", "definitely-missing-log-dir"),
-            today = LocalDate.of(2026, 10, 24),
-        )
+    fun pruning_missing_directory_does_not_touch_other_files() {
+        // 目录不存在时只能「什么都不做」：构造一个同命名规则、但位于别处的日志，
+        // 断言它没有被误删（旧用例只调用不断言，实现改成乱删也能通过 —— P3-T6）
+        val dir = Files.createTempDirectory("ktdown-logs-keep")
+        try {
+            val keep = dir.resolve("app-2020-01-01.log")
+            Files.writeString(keep, "x")
+
+            pruneOldLogs(
+                directory = dir.resolve("definitely-missing-subdir"),
+                today = LocalDate.of(2026, 10, 24),
+                retentionDays = 30,
+            )
+
+            assertTrue(Files.exists(keep), "目标目录不存在时不得波及其它目录下的文件")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
     }
 }
