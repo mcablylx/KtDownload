@@ -26,43 +26,8 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * UC Cookie 工具：合并/剥离 __puus、__pus（与夸克共用，对应 AList pkg/cookie）。
- * __puus 约 3 小时过期，是取链接口（/file/download 等）必须携带的有效会话字段。
- */
-object UCCookieUtil {
-    private val TRACKED = setOf("__puus", "__pus")
-
-    /** 把响应 Set-Cookie 列表里的最新 __puus/__pus 合并回原 Cookie 串 */
-    fun mergeFromSetCookies(original: String, setCookies: List<String>): String {
-        var cookie = original
-        for (sc in setCookies) {
-            val kv = sc.substringBefore(';').trim()
-            val eq = kv.indexOf('=')
-            if (eq <= 0) continue
-            val name = kv.substring(0, eq)
-            if (name in TRACKED) cookie = setOrReplace(cookie, name, kv.substring(eq + 1))
-        }
-        return cookie
-    }
-
-    /** 去掉 __puus，用于触发服务端重新下发（AList refreshPuus） */
-    fun withoutPuus(cookie: String): String =
-        cookie.split(";").map { it.trim() }
-            .filter { !it.startsWith("__puus=") }
-            .joinToString("; ")
-
-    private fun setOrReplace(cookie: String, name: String, value: String): String {
-        val parts = cookie.split(";").map { it.trim() }.toMutableList()
-        val idx = parts.indexOfFirst { it.startsWith("$name=") }
-        val kv = "$name=$value"
-        if (idx >= 0) parts[idx] = kv else parts.add(kv)
-        return parts.joinToString("; ")
-    }
-}
-
-/**
  * UC 网盘 API 封装（OkHttp）：账号验证 + 分享解析 + 下载直链。
- * 与夸克 API 结构一致，仅域名/UA/pr 参数不同。
+ * 与夸克 API 结构一致，仅域名/UA/pr 参数不同；Cookie 处理统一走 [CookieUtil]（P3-1）。
  */
 class UCApi(
     private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() }
@@ -351,14 +316,14 @@ class UCApi(
     suspend fun refreshSession(cookie: String): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(UCConstants.CONFIG_URL)
-            .header("Cookie", UCCookieUtil.withoutPuus(cookie))
+            .header("Cookie", CookieUtil.withoutPuus(cookie))
             .header("User-Agent", UCConstants.USER_AGENT)
             .header("Referer", UCConstants.DOWNLOAD_REFERER)
             .get()
             .build()
         runCatching {
             client.newCall(request).execute().use { resp ->
-                val merged = UCCookieUtil.mergeFromSetCookies(cookie, resp.headers("Set-Cookie"))
+                val merged = CookieUtil.mergeFromSetCookies(cookie, resp.headers("Set-Cookie"))
                 if (merged != cookie) cookieSink?.invoke(merged, cookie)
                 merged
             }
@@ -386,16 +351,16 @@ class UCApi(
         val request = postJson(UCConstants.DOWNLOAD_URL, cookie, body)
         val response = client.newCall(request).execute()
         val bodyStr = response.use {
-            it.body?.string() ?: throw QuarkApiException("获取下载链接失败：响应为空")
+            it.body?.string() ?: throw UCApiException("获取下载链接失败：响应为空")
         }
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
-            throw QuarkApiException("响应解析失败")
+            throw UCApiException("响应解析失败")
         }
         if (json.optInt("status") != 200) {
-            throw QuarkApiException(json.optString("message").ifBlank { "获取下载链接失败" })
+            throw UCApiException(json.optString("message").ifBlank { "获取下载链接失败" })
         }
         val item = json.optJSONArray("data")?.optJSONObject(0)
-            ?: throw QuarkApiException("未返回下载链接")
+            ?: throw UCApiException("未返回下载链接")
         DownloadLink(
             fid = item.optString("fid"),
             filename = item.optString("file_name").ifEmpty { item.optString("filename") },
@@ -411,7 +376,7 @@ class UCApi(
      * （3 小时有效，且与本次直链同响应绑定；缺它 CDN 直接 403 RequestDeniedByCallback）。
      * 这里捕获后写进 [DownloadLink.guestCookie]，同时缓存到 [guestPugs] 供后续文件复用。
      *
-     * @throws QuarkApiException 需登录（31001）、超出游客大小上限（23018）、令牌失效（14001/41020）等
+     * @throws UCApiException 需登录（31001）、超出游客大小上限（23018）、令牌失效（14001/41020）等
      */
     suspend fun getGuestShareDownloadLink(
         fid: String,
@@ -430,20 +395,20 @@ class UCApi(
         // 先取本次响应的 __pugs（与本次直链同响应绑定，不能用别的响应/上一次的值）
         val responsePugs = pugsFromSetCookies(response.headers("Set-Cookie"))
         val bodyStr = response.use {
-            it.body?.string() ?: throw QuarkApiException("获取下载链接失败：响应为空")
+            it.body?.string() ?: throw UCApiException("获取下载链接失败：响应为空")
         }
         if (responsePugs != null) guestPugs = responsePugs
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
             // 非 JSON（风控页/HTML 错误页）时带上 HTTP 状态码，便于分辨 401/403 与分享失效
-            throw QuarkApiException("响应解析失败（HTTP ${response.code}）")
+            throw UCApiException("响应解析失败（HTTP ${response.code}）")
         }
         val code = json.optInt("code")
         if (json.optInt("status") != 200 && code != 0) {
-            throw QuarkApiException(guestErrorMessage(code, json.optString("message")), code)
+            throw UCApiException(guestErrorMessage(code, json.optString("message")), code)
         }
-        val array = json.optJSONArray("data") ?: throw QuarkApiException("响应缺少 data")
-        if (array.length() == 0) throw QuarkApiException("未返回下载链接")
-        val item = array.optJSONObject(0) ?: throw QuarkApiException("未返回下载链接")
+        val array = json.optJSONArray("data") ?: throw UCApiException("响应缺少 data")
+        if (array.length() == 0) throw UCApiException("未返回下载链接")
+        val item = array.optJSONObject(0) ?: throw UCApiException("未返回下载链接")
         DownloadLink(
             fid = item.optString("fid"),
             filename = item.optString("file_name").ifEmpty { item.optString("filename") },
@@ -462,11 +427,9 @@ class UCApi(
         else -> message.ifBlank { "获取下载链接失败" }
     }
 
-    /** 从响应 Set-Cookie 里取出游客态令牌，返回可直接当 Cookie 头用的 `__pugs=值`；没有则 null */
+    /** 从响应 Set-Cookie 里取出游客态令牌（实现见 [CookieUtil.pugsFromSetCookies]） */
     private fun pugsFromSetCookies(setCookies: List<String>): String? =
-        setCookies.asSequence()
-            .map { it.substringBefore(';').trim() }
-            .firstOrNull { it.startsWith("__pugs=") && it.length > "__pugs=".length }
+        CookieUtil.pugsFromSetCookies(setCookies)
 
     /** 游客请求构造：Cookie 为空时不发该头；UA/Sec-Ch-Ua 用 uc-cloud-drive 客户端（游客链路风控更严） */
     private fun postJsonGuest(url: String, cookie: String, body: String): Request =
@@ -484,20 +447,20 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         val request = postJson(UCConstants.DOWNLOAD_URL, cookie, body)
         val response = client.newCall(request).execute()
         val bodyStr = response.use {
-            it.body?.string() ?: throw QuarkApiException("获取下载链接失败：响应为空")
+            it.body?.string() ?: throw UCApiException("获取下载链接失败：响应为空")
         }
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
-            throw QuarkApiException("响应解析失败")
+            throw UCApiException("响应解析失败")
         }
         if (json.optInt("status") != 200 && json.optInt("code") != 0) {
-            throw QuarkApiException(
+            throw UCApiException(
                 json.optString("message").ifBlank { "获取下载链接失败" },
                 json.optInt("code")
             )
         }
-        val array = json.optJSONArray("data") ?: throw QuarkApiException("响应缺少 data")
-        if (array.length() == 0) throw QuarkApiException("未返回下载链接")
-        val item = array.optJSONObject(0) ?: throw QuarkApiException("未返回下载链接")
+        val array = json.optJSONArray("data") ?: throw UCApiException("响应缺少 data")
+        if (array.length() == 0) throw UCApiException("未返回下载链接")
+        val item = array.optJSONObject(0) ?: throw UCApiException("未返回下载链接")
         DownloadLink(
             fid = item.optString("fid"),
             filename = item.optString("file_name").ifEmpty { item.optString("filename") },
@@ -544,20 +507,20 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
             .build()
         val response = client.newCall(request).execute()
         val bodyStr = response.use {
-            it.body?.string() ?: throw QuarkApiException("获取下载链接失败：响应为空")
+            it.body?.string() ?: throw UCApiException("获取下载链接失败：响应为空")
         }
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
-            throw QuarkApiException("响应解析失败")
+            throw UCApiException("响应解析失败")
         }
         if (json.optInt("status") != 200 && json.optInt("code") != 0) {
-            throw QuarkApiException(
+            throw UCApiException(
                 json.optString("message").ifBlank { "获取下载链接失败" },
                 json.optInt("code")
             )
         }
-        val array = json.optJSONArray("data") ?: throw QuarkApiException("响应缺少 data")
-        if (array.length() == 0) throw QuarkApiException("未返回下载链接")
-        val item = array.optJSONObject(0) ?: throw QuarkApiException("未返回下载链接")
+        val array = json.optJSONArray("data") ?: throw UCApiException("响应缺少 data")
+        if (array.length() == 0) throw UCApiException("未返回下载链接")
+        val item = array.optJSONObject(0) ?: throw UCApiException("未返回下载链接")
         DownloadLink(
             fid = item.optString("fid"),
             filename = item.optString("file_name").ifEmpty { item.optString("filename") },
@@ -858,17 +821,17 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         val response = client.newCall(request).execute()
         val body = response.use {
             mergeCookieFromResponse(request, it)
-            it.body?.string() ?: throw QuarkApiException("请求失败：响应为空")
+            it.body?.string() ?: throw UCApiException("请求失败：响应为空")
         }
         val json = runCatching { JSONObject(body) }.getOrElse {
             // 服务端返回非 JSON（多半是 HTML 错误页/风控页）时带上 HTTP 状态码，
             // 便于分辨「未登录被拒（401/403）」与「分享已失效」
-            throw QuarkApiException("响应解析失败（HTTP ${response.code}）")
+            throw UCApiException("响应解析失败（HTTP ${response.code}）")
         }
         if (json.optInt("status") != 200) {
-            throw QuarkApiException(json.optString("message").ifBlank { "请求失败" })
+            throw UCApiException(json.optString("message").ifBlank { "请求失败" })
         }
-        return parser(json.optJSONObject("data") ?: throw QuarkApiException("响应缺少 data"))
+        return parser(json.optJSONObject("data") ?: throw UCApiException("响应缺少 data"))
     }
 
     /** 从响应 Set-Cookie 合并 __puus/__pus 回原 Cookie 并回调 cookieSink（保持会话新鲜，对齐 AList requestWithCookie） */
@@ -877,7 +840,7 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         if (setCookies.isEmpty()) return
         val original = request.header("Cookie").orEmpty()
         if (original.isBlank()) return
-        val merged = UCCookieUtil.mergeFromSetCookies(original, setCookies)
+        val merged = CookieUtil.mergeFromSetCookies(original, setCookies)
         if (merged != original) cookieSink?.invoke(merged, original)
     }
 }

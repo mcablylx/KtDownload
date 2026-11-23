@@ -46,6 +46,13 @@ object LanzouConstants {
     /** 个人盘根目录 folder_id（-1 表根） */
     const val ROOT_FOLDER_ID = "-1"
 
+    /** 列表接口被风控（zt=0/异常）时的重试间隔与次数上限 */
+    const val LIST_RETRY_DELAY_MS = 300L
+    const val LIST_RETRY_LIMIT = 2
+
+    /** 确认页的「验证并下载」按钮约 2 秒后才由脚本渲染，提交前必须等同样时长 */
+    const val CONFIRM_BUTTON_WAIT_MS = 2000L
+
     /** 分页上限（防止接口异常时死循环） */
     const val MAX_FILE_PAGES = 1000
     const val MAX_FOLDER_PAGES = 500

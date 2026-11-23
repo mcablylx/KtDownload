@@ -20,8 +20,8 @@ package top.mcly99.dl.data.network
  */
 internal object LanzouCrypto {
 
-    /** 重排位置表：把 arg1 的第 pos[z] 个字符放到第 z 位（1-based） */
-    private val POS = intArrayOf(
+    /** 重排位置表：把 arg1 的第 pos[z] 个字符放到第 z 位（1-based）；internal 便于单测校验它是 1..40 的排列 */
+    internal val POS = intArrayOf(
         15, 35, 29, 24, 33, 16, 1, 38, 10, 9, 19, 31, 40, 27, 22, 23, 25, 13, 6, 11,
         39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34, 37, 12, 36
     )

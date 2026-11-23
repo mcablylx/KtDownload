@@ -110,7 +110,7 @@ class GuangYaApi(
                     captcha = initCaptcha(device, meta, "POST:/v1/auth/signin")
                 }
             }
-            tokens!!
+            checkNotNull(tokens) { "光鸭登录未返回凭证" }
         }
 
     private fun doSignIn(
@@ -181,7 +181,7 @@ class GuangYaApi(
                     }
                 }
             }
-            challenge!!
+            checkNotNull(challenge) { "光鸭短信验证码未下发" }
         }
 
     private fun doSendSmsCode(phoneNumber: String, captchaToken: String?, device: GuangYaDevice): GuangYaSmsChallenge {

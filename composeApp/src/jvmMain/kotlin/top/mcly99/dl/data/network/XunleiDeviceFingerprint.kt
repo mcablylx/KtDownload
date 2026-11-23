@@ -53,8 +53,9 @@ object XunleiDeviceFingerprint {
             val savedId = prefs.get(KEY_ID, null)
             if (savedId != null) {
                 deviceId = savedId
-                peerId = prefs.get(KEY_PEER, XunleiConstants.PEER_ID)!!
-                deviceSign = prefs.get(KEY_SIGN, XunleiConstants.DEVICE_SIGN)!!
+                // 旧版本/配置被改坏时 KEY_PEER/KEY_SIGN 可能缺失：用常量回退而非 !! NPE（P2-5）
+                peerId = prefs.get(KEY_PEER, XunleiConstants.PEER_ID) ?: XunleiConstants.PEER_ID
+                deviceSign = prefs.get(KEY_SIGN, XunleiConstants.DEVICE_SIGN) ?: XunleiConstants.DEVICE_SIGN
             } else {
                 // 首次启动：生成唯一设备指纹并持久化
                 val newId = randomHex(32)

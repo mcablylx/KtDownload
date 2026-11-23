@@ -107,13 +107,14 @@ class BaiduApi(
 
     private val formMediaType = "application/x-www-form-urlencoded".toMediaType()
 
-    /** bdstoken 缓存（登录态内长期有效） */
-    @Volatile
-    private var cachedBdstoken: String? = null
+    /**
+     * bdstoken 缓存：token 与归属 Cookie 绑定，换凭证后必须重取（登录态内长期有效）。
+     * 两者放在同一个不可变对象里整体赋值，避免并发下 token/owner 错配跨账号复用（P1-2）。
+     */
+    private data class BdstokenCache(val token: String, val ownerHash: Int)
 
-    /** 缓存归属：cachedBdstoken 对应的 Cookie 哈希，换凭证后必须重取 */
     @Volatile
-    private var cachedBdstokenOwner: Int = 0
+    private var bdstokenCache: BdstokenCache? = null
 
     /** 上次转存成功的参数形状下标（见 [TRANSFER_SHAPES]），批量下载时直接复用它 */
     @Volatile
@@ -153,12 +154,11 @@ class BaiduApi(
     /** 获取 bdstoken（gettemplatevariable，带缓存） */
     suspend fun getBdstoken(cookie: String): String? = withContext(Dispatchers.IO) {
         // 缓存必须与 Cookie 绑定：换账号/游客→登录后仍用旧 token 会让转存/删除静默失败
-        cachedBdstoken?.takeIf { it.isNotBlank() && cachedBdstokenOwner == cookie.hashCode() }
-            ?.let { return@withContext it }
+        bdstokenCache?.takeIf { it.token.isNotBlank() && it.ownerHash == cookie.hashCode() }
+            ?.let { return@withContext it.token }
         val result = templateVariable(cookie, """["bdstoken"]""") ?: return@withContext null
         val token = result.optString("bdstoken").takeIf { it.isNotBlank() } ?: return@withContext null
-        cachedBdstoken = token
-        cachedBdstokenOwner = cookie.hashCode()
+        bdstokenCache = BdstokenCache(token, cookie.hashCode())
         token
     }
 
@@ -167,12 +167,10 @@ class BaiduApi(
      * 用于 errno=-6（bdstoken 失效）时重试，或登出/换账号时清空避免跨账号复用。
      */
     suspend fun refreshBdstoken(cookie: String): String? = withContext(Dispatchers.IO) {
-        cachedBdstoken = null
-        cachedBdstokenOwner = 0
+        bdstokenCache = null
         val result = templateVariable(cookie, """["bdstoken"]""") ?: return@withContext null
         val token = result.optString("bdstoken").takeIf { it.isNotBlank() } ?: return@withContext null
-        cachedBdstoken = token
-        cachedBdstokenOwner = cookie.hashCode()
+        bdstokenCache = BdstokenCache(token, cookie.hashCode())
         token
     }
 
@@ -184,8 +182,7 @@ class BaiduApi(
      */
     @Suppress("UNUSED")
     fun clearSessionCache() {
-        cachedBdstoken = null
-        cachedBdstokenOwner = 0
+        bdstokenCache = null
     }
 
     private suspend fun templateVariable(cookie: String, fields: String): JSONObject? =
@@ -340,7 +337,10 @@ class BaiduApi(
 
     private fun firstCapture(text: String, vararg patterns: String): String? {
         for (p in patterns) {
-            val value = Regex(p).find(text)?.groupValues?.getOrNull(1)
+            // 模式都是调用方写的字面量，按串缓存编译结果：分享解析是热路径，每次 2~6 条
+            // 重新 Regex() 编译纯属浪费（P3-2）
+            val value = BAIDU_PATTERN_CACHE.getOrPut(p) { Regex(p) }
+                .find(text)?.groupValues?.getOrNull(1)
             if (!value.isNullOrBlank()) return value
         }
         return null
@@ -1244,12 +1244,15 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
      */
     suspend fun listCloudFiles(dir: String, cookie: String): List<ShareFile> = withContext(Dispatchers.IO) {
         val bdstoken = getBdstoken(cookie)
+        // 三重重试共享同一个「当前有效 token」：每重重试刷新出的新值都更新它。
+        // 旧实现第三重回退到最初的 bdstoken（用脏 Cookie 取的失效值），兜底形同虚设。
+        var effectiveToken = bdstoken
         // 首试：用当前 bdstoken（可能为空，仍尝试一次让服务端兜底）
-        var (array, errno) = requestListCloudFiles(dir, cookie, bdstoken)
+        var (array, errno) = requestListCloudFiles(dir, cookie, effectiveToken)
         if (errno == -6) {
             // bdstoken 失效：强制刷新后重试一次
-            val fresh = refreshBdstoken(cookie) ?: bdstoken
-            val (array2, errno2) = requestListCloudFiles(dir, cookie, fresh)
+            effectiveToken = refreshBdstoken(cookie) ?: effectiveToken
+            val (array2, errno2) = requestListCloudFiles(dir, cookie, effectiveToken)
             array = array2
             errno = errno2
         }
@@ -1259,8 +1262,10 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
             // 必然失败。按 name 去重（保留最后一次）后再走一遍，避免强迫用户重新登录。
             val clean = deduplicateCookieHeader(cookie)
             if (clean != cookie) {
-                val fresh = refreshBdstoken(clean) ?: bdstoken
-                val (array3, errno3) = requestListCloudFiles(dir, clean, fresh)
+                // 回退到上一重刷新出的 token（若刷新成功）而非最初的失效值；
+                // 并尝试用干净 Cookie 再刷一次，拿不到也至少保留上一重的值。
+                effectiveToken = refreshBdstoken(clean) ?: effectiveToken
+                val (array3, errno3) = requestListCloudFiles(dir, clean, effectiveToken)
                 array = array3
                 errno = errno3
             }
@@ -1528,3 +1533,9 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
 
     private fun urlEncode(value: String): String = URLEncoder.encode(value, "UTF-8")
 }
+
+/**
+ * 分享页解析的正则缓存（P3-2）：`firstCapture()` 的模式全部来自代码里的字面量，
+ * 键的数量固定，按串缓存即可避免每次解析都重新编译。
+ */
+private val BAIDU_PATTERN_CACHE = java.util.concurrent.ConcurrentHashMap<String, Regex>()

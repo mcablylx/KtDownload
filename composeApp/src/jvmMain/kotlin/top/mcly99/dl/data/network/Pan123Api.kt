@@ -435,7 +435,13 @@ class Pan123Api(
     /** 从分享列表项提取数值 ShareId（S3KeyFlag 形如 "1816216065-0"，前缀即 mshare 子域数字） */
     private fun shareIdOf(file: ShareFile): String {
         val s3 = file.fidToken.substringBefore('|')
-        return s3.substringBefore('-')
+        val shareId = s3.substringBefore('-')
+        // 该值直接拼进 mshare 子域名（https://$shareId.mshare.123pan.cn）：
+        // 服务端字段被污染若含 . / @ ? 等会拼出非预期 host，构成请求重定向面（P1-E1）。
+        require(shareId.matches(Regex("^[0-9]{1,20}$"))) {
+            "非法的 123 云盘 ShareId: $shareId"
+        }
+        return shareId
     }
 
     /** 删除（移入回收站）：POST /b/api/file/trash */
@@ -627,19 +633,27 @@ class Pan123Api(
         val trimmed = downloadUrl.trim()
         // 形态 1：整段 base64（不含协议头的串）
         if (!trimmed.contains("://")) {
-            return runCatching {
-                String(Base64.getDecoder().decode(trimmed), Charsets.UTF_8)
-                    .takeIf { it.startsWith("http", ignoreCase = true) }
-            }.getOrNull()
+            return decodeBase64Loose(trimmed)?.takeIf { it.startsWith("http", ignoreCase = true) }
         }
         // 形态 2：download-v2?params=<base64>
         val idx = trimmed.indexOf("params=")
         if (idx < 0) return null
         val params = trimmed.substring(idx + "params=".length).substringBefore("&")
-        return runCatching {
-            val normalized = params.replace('-', '+').replace('_', '/')
-            String(Base64.getDecoder().decode(normalized), Charsets.UTF_8)
-        }.getOrNull()
+        return decodeBase64Loose(params)
+    }
+
+    /**
+     * 宽松 Base64 解码（P2-E5）：服务端给的串可能是 URL-safe 字母表且**不带 padding**，
+     * 而 `Base64.getDecoder()` 遇到缺 padding 会抛异常、遇到 `-`/`_` 直接判非法，
+     * 原来被 runCatching 吞掉后只能回退到中转页。这里先按 `len % 4` 补齐 `=`，
+     * 标准字母表解不出来再换 URL-safe 解码器。
+     */
+    private fun decodeBase64Loose(raw: String): String? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        val padded = trimmed + "=".repeat((4 - trimmed.length % 4) % 4)
+        return runCatching { String(Base64.getDecoder().decode(padded), Charsets.UTF_8) }.getOrNull()
+            ?: runCatching { String(Base64.getUrlDecoder().decode(padded), Charsets.UTF_8) }.getOrNull()
     }
 
     /**

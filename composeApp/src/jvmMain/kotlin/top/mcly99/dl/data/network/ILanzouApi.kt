@@ -56,7 +56,7 @@ class ILanzouApi(
         )
         val json = exec(Request.Builder().url(url).headers(commonHeaders(false)).get().build())
         val uuid = json.optString("uuid")
-        if (!UUID_REGEX.matches(uuid)) throw IllegalStateException("蓝奏优享未返回有效设备标识")
+        if (!LANZOU_UUID_REGEX.matches(uuid)) throw IllegalStateException("蓝奏优享未返回有效设备标识")
         uuid
     }
 
@@ -587,7 +587,12 @@ class ILanzouApi(
         values.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
 
     private companion object {
-        val UUID_REGEX = Regex("^[A-Za-z0-9_-]{8,128}$")
         val TOKEN_REGEX = Regex("^[A-Za-z0-9._~+/=:!%&?\\-]+$")
     }
 }
+
+/**
+ * 蓝奏优享设备标识 / 会话 uuid 的字符集约束（P3-2）。
+ * API 校验响应、仓库校验本地缓存都用这一份，避免两处正则漂移。
+ */
+internal val LANZOU_UUID_REGEX = Regex("^[A-Za-z0-9_-]{8,128}$")

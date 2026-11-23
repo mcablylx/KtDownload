@@ -1,10 +1,10 @@
 package top.mcly99.dl.engine.clouddrive
 
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import java.net.URLEncoder
 
 /**
@@ -36,8 +36,8 @@ class XunleiDriveCredentialTest {
         val payload = """{"access_token":"$access","refresh_token":"$refresh","device_id":"dev-from-payload"}"""
         val cred = XunleiDriveCredential.parse(bridgeCookies(payload, "cookie-device"))
 
-        assertNotNull("Cookie 串里的分片必须能拼回结构化凭证", cred)
-        assertEquals(access, cred!!.accessToken)
+        assertNotNull(cred, "Cookie 串里的分片必须能拼回结构化凭证")
+        assertEquals(access, cred.accessToken)
         assertEquals(refresh, cred.refreshToken)
         assertEquals("dev-from-payload", cred.deviceId)
         assertTrue(cred.isUsable)
@@ -62,7 +62,7 @@ class XunleiDriveCredentialTest {
         val cookie = bridgeCookies(payload, "dev", chunkSize = 1000)
         val cred = XunleiDriveCredential.parse(cookie)
 
-        assertTrue("构造出来的样例必须真的分了好几片", cookie.contains("yunx_xl_cred_2="))
+        assertTrue(cookie.contains("yunx_xl_cred_2="), "构造出来的样例必须真的分了好几片")
         assertEquals(longToken, cred?.accessToken)
     }
 

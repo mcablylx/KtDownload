@@ -17,7 +17,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
-import org.junit.Test
+import kotlin.test.Test
 import java.util.Collections
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue

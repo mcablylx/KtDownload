@@ -25,42 +25,9 @@ import org.json.JSONObject
 import java.net.URLEncoder
 
 /**
- * 夸克 Cookie 工具：合并/剥离 __puus、__pus（对应 AList pkg/cookie + quark_uc requestWithCookie）。
- * __puus 约 3 小时过期，是下载直链签名校验的关键字段（AlistGo/alist#830）。
- */
-object QuarkCookieUtil {
-    private val TRACKED = setOf("__puus", "__pus")
-
-    /** 把响应 Set-Cookie 列表里的最新 __puus/__pus 合并回原 Cookie 串 */
-    fun mergeFromSetCookies(original: String, setCookies: List<String>): String {
-        var cookie = original
-        for (sc in setCookies) {
-            val kv = sc.substringBefore(';').trim()
-            val eq = kv.indexOf('=')
-            if (eq <= 0) continue
-            val name = kv.substring(0, eq)
-            if (name in TRACKED) cookie = setOrReplace(cookie, name, kv.substring(eq + 1))
-        }
-        return cookie
-    }
-
-    /** 去掉 __puus，用于触发服务端重新下发（AList refreshPuus） */
-    fun withoutPuus(cookie: String): String =
-        cookie.split(";").map { it.trim() }
-            .filter { !it.startsWith("__puus=") }
-            .joinToString("; ")
-
-    private fun setOrReplace(cookie: String, name: String, value: String): String {
-        val parts = cookie.split(";").map { it.trim() }.toMutableList()
-        val idx = parts.indexOfFirst { it.startsWith("$name=") }
-        val kv = "$name=$value"
-        if (idx >= 0) parts[idx] = kv else parts.add(kv)
-        return parts.joinToString("; ")
-    }
-}
-
-/**
  * 夸克 API 封装（OkHttp）：账号验证 + 分享解析 + 下载直链。
+ *
+ * Cookie 的合并/剥离逻辑与 UC 完全一致，统一走 [CookieUtil]（P3-1）。
  */
 class QuarkApi(
     private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() }
@@ -406,14 +373,14 @@ class QuarkApi(
     suspend fun refreshSession(cookie: String): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(QuarkConstants.CONFIG_URL)
-            .header("Cookie", QuarkCookieUtil.withoutPuus(cookie))
+            .header("Cookie", CookieUtil.withoutPuus(cookie))
             .header("User-Agent", QuarkConstants.API_USER_AGENT)
             .header("Referer", QuarkConstants.DOWNLOAD_REFERER)
             .get()
             .build()
         runCatching {
             client.newCall(request).execute().use { resp ->
-                val merged = QuarkCookieUtil.mergeFromSetCookies(cookie, resp.headers("Set-Cookie"))
+                val merged = CookieUtil.mergeFromSetCookies(cookie, resp.headers("Set-Cookie"))
                 if (merged != cookie) cookieSink?.invoke(merged, cookie)
                 merged
             }
@@ -574,11 +541,9 @@ class QuarkApi(
         else -> message.ifBlank { "获取下载链接失败" }
     }
 
-    /** 从响应 Set-Cookie 里取出游客态令牌，返回可直接当 Cookie 头用的 `__pugs=值`；没有则 null */
+    /** 从响应 Set-Cookie 里取出游客态令牌（实现见 [CookieUtil.pugsFromSetCookies]） */
     private fun pugsFromSetCookies(setCookies: List<String>): String? =
-        setCookies.asSequence()
-            .map { it.substringBefore(';').trim() }
-            .firstOrNull { it.startsWith("__pugs=") && it.length > "__pugs=".length }
+        CookieUtil.pugsFromSetCookies(setCookies)
 
     /** 游客请求构造：Cookie 为空时干脆不发该头（首次取链手上没有任何令牌） */
     private fun postJsonGuest(url: String, cookie: String, body: String): Request =
@@ -745,7 +710,7 @@ class QuarkApi(
         if (setCookies.isEmpty()) return
         val original = request.header("Cookie").orEmpty()
         if (original.isBlank()) return
-        val merged = QuarkCookieUtil.mergeFromSetCookies(original, setCookies)
+        val merged = CookieUtil.mergeFromSetCookies(original, setCookies)
         if (merged != original) cookieSink?.invoke(merged, original)
     }
 }

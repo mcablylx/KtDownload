@@ -93,9 +93,10 @@ class XunleiApi(
     /** 游客 captcha：按 (deviceId, action) 缓存，服务端只给 300s，过期重签 */
     private val guestCaptchas = java.util.concurrent.ConcurrentHashMap<String, PanCaptcha>()
 
-    /** 当前有效 access_token（401 自动刷新后更新；pan 请求优先使用，避免刷新后闭包仍用旧值） */
-    @Volatile
-    private var currentAccessToken: String = ""
+    // 注意：access_token 一律按请求参数传递，不再用实例级全局缓存。
+    // 旧实现用 currentAccessToken 覆盖传入 token，导致多账号下载时 A 账号凭证被 B 账号覆盖（P0-2）。
+    // 401 刷新后的新 token 由 refreshTokenProvider 持久化，并通过 panCallInternal 的局部
+    // effectiveToken 传给本次重试的 build 闭包，不经过实例字段。
 
     /** 401/unauthenticated 时自动刷新：提供 refresh_token 换新 token（由调用方注入并持久化） */
     var refreshTokenProvider: suspend (deviceId: String) -> Pair<String, String>? = { null }
@@ -262,7 +263,6 @@ class XunleiApi(
                 if (at.isBlank()) null else {
                     // 缓存 user_id（JWT sub），captcha/init 的 meta 需要
                     jwtSub(at).takeIf { it.isNotBlank() }?.let { currentUserId = it }
-                    currentAccessToken = at
                     at to rt
                 }
             }
@@ -330,7 +330,6 @@ class XunleiApi(
                     val rt = json.optString("refresh_token").ifBlank { json.optString("refreshToken") }
                     if (at.isBlank()) null else {
                         jwtSub(at).takeIf { it.isNotBlank() }?.let { currentUserId = it }
-                        currentAccessToken = at
                         at to rt
                     }
                 }
@@ -344,8 +343,8 @@ class XunleiApi(
      * 中间态写进去，所以这里打一次真实的云盘接口（GET /drive/v1/about）再决定要不要落库；
      * 网络异常也返回 false，交给上层的自动检测继续轮询重试，不会误判成「登录成功」。
      *
-     * **必须校验传入的这个 token**（`preferCachedToken = false`）：实例上缓存的 currentAccessToken
-     * 属于上一次（可能是另一个账号）的登录，拿它去校验会把「有效」判在错误的账号头上。
+     * 校验时只认传入的 token：panRequest 一律用按请求传入的 accessToken，
+     * 不读任何实例级全局 token，因此不会把「有效」判在别的账号头上。
      */
     suspend fun verifyAccessToken(
         accessToken: String,
@@ -356,8 +355,7 @@ class XunleiApi(
         runCatching {
             val request = panRequest(
                 "${XunleiConstants.PAN_BASE}/drive/v1/about",
-                accessToken, deviceId, captchaToken,
-                preferCachedToken = false
+                accessToken, deviceId, captchaToken
             )
             client.newCall(request).execute().use { resp ->
                 if (!resp.isSuccessful) return@use false
@@ -452,8 +450,8 @@ class XunleiApi(
             append("?parent_id=").append(parentId)
             append("&page_token=&limit=50&with_audit=true&filters=").append(filters)
         }
-        panCall(captchaToken, deviceId, "GET:/drive/v1/files", { t ->
-            panRequest(url, accessToken, deviceId, t)
+        panCall(captchaToken, deviceId, "GET:/drive/v1/files", accessToken, { t, at ->
+            panRequest(url, at, deviceId, t)
         }) { data ->
             data.optJSONArray("files")?.let(::parseFileArray) ?: emptyList()
         }
@@ -473,8 +471,8 @@ class XunleiApi(
             .put("parent_id", parentId)
             .put("space", "") // 官方 proto 要求字符串，数字会 400
             .toString()
-        panCall(captchaToken, deviceId, "POST:/drive/v1/files", { t ->
-            panRequest(XunleiConstants.FILES_URL, accessToken, deviceId, t, body)
+        panCall(captchaToken, deviceId, "POST:/drive/v1/files", accessToken, { t, at ->
+            panRequest(XunleiConstants.FILES_URL, at, deviceId, t, body)
         }) { data -> data.optString("id").takeIf { it.isNotBlank() } }
     }
 
@@ -487,8 +485,8 @@ class XunleiApi(
     ): DownloadLink? = withContext(Dispatchers.IO) {
         val url = "${XunleiConstants.FILES_URL}/$fileId?_magic=2021&usage=PLAY&thumbnail_size=SIZE_LARGE" +
             "&with=hdr10&with=subtitle_files&with=task&with=public_share_tag"
-        panCall(captchaToken, deviceId, "GET:/drive/v1/files/$fileId", { t ->
-            panRequest(url, accessToken, deviceId, t)
+        panCall(captchaToken, deviceId, "GET:/drive/v1/files/$fileId", accessToken, { t, at ->
+            panRequest(url, at, deviceId, t)
         }) { data ->
             val links = data.optJSONObject("links")
             val urlStr = links?.optJSONObject("application/octet-stream")?.optString("url")
@@ -520,7 +518,7 @@ class XunleiApi(
                 .append(java.net.URLEncoder.encode(pageToken, "UTF-8"))
                 .append("&thumbnail_size=SIZE_SMALL")
         }
-        val build: (String) -> Request = { t -> panRequest(url, accessToken, deviceId, t) }
+        val build: (String, String) -> Request = { t, at -> panRequest(url, at, deviceId, t) }
         val parse: (JSONObject) -> XunleiShareResult = { data ->
             // 提取码状态检查：PASS_CODE_EMPTY（没填）/ PASS_CODE_ERROR（错误）/ PASS_CODE_NEED（需要）
             // 这三种情况 files 为空数组且 HTTP 200，若不识别会被误判为「此目录为空」
@@ -542,7 +540,7 @@ class XunleiApi(
         if (accessToken.isBlank()) {
             panCallAnonymous(captchaToken, deviceId, "GET:/drive/v1/share", build, parse)
         } else {
-            panCall(captchaToken, deviceId, "GET:/drive/v1/share", build, parse)
+            panCall(captchaToken, deviceId, "GET:/drive/v1/share", accessToken, build, parse)
         }
     }
 
@@ -565,7 +563,7 @@ class XunleiApi(
                 .append(java.net.URLEncoder.encode(pageToken, "UTF-8"))
                 .append("&thumbnail_size=SIZE_SMALL")
         }
-        val build: (String) -> Request = { t -> panRequest(url, accessToken, deviceId, t) }
+        val build: (String, String) -> Request = { t, at -> panRequest(url, at, deviceId, t) }
         val parse: (JSONObject) -> XunleiFilePage = { data ->
             XunleiFilePage(
                 files = data.optJSONArray("files")?.let(::parseFileArray) ?: emptyList(),
@@ -576,7 +574,7 @@ class XunleiApi(
         if (accessToken.isBlank()) {
             panCallAnonymous(captchaToken, deviceId, "GET:/drive/v1/share/detail", build, parse)
         } else {
-            panCall(captchaToken, deviceId, "GET:/drive/v1/share/detail", build, parse)
+            panCall(captchaToken, deviceId, "GET:/drive/v1/share/detail", accessToken, build, parse)
         }
     }
 
@@ -598,8 +596,8 @@ class XunleiApi(
             .put("file_ids", JSONArray().apply { fileIds.forEach { put(it) } })
             .put("specify_parent_id", true)
             .toString()
-        panCall(captchaToken, deviceId, "POST:/drive/v1/share/restore", { t ->
-            panRequest(XunleiConstants.RESTORE_URL, accessToken, deviceId, t, body)
+        panCall(captchaToken, deviceId, "POST:/drive/v1/share/restore", accessToken, { t, at ->
+            panRequest(XunleiConstants.RESTORE_URL, at, deviceId, t, body)
         }) { data ->
             // params.trace_file_ids 是 JSON 字符串：{"分享文件id":"转存后新id"}
             val trace = data.optJSONObject("params")?.optString("trace_file_ids").orEmpty()
@@ -624,8 +622,8 @@ class XunleiApi(
             .put("ids", JSONArray().apply { ids.forEach { put(it) } })
             .put("space", "")
             .toString()
-        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchDelete", { t ->
-            panRequest("${XunleiConstants.FILES_URL}:batchDelete", accessToken, deviceId, t, body)
+        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchDelete", accessToken, { t, at ->
+            panRequest("${XunleiConstants.FILES_URL}:batchDelete", at, deviceId, t, body)
         }) { true }
     }
 
@@ -635,8 +633,8 @@ class XunleiApi(
             val url = "${XunleiConstants.TASKS_URL}/$taskId?type=share"
             for (i in 0 until 15) {
                 val done = runCatching {
-                    panCall(captchaToken, deviceId, "GET:/drive/v1/tasks/$taskId", { t ->
-                        panRequest(url, accessToken, deviceId, t)
+                    panCall(captchaToken, deviceId, "GET:/drive/v1/tasks/$taskId", accessToken, { t, at ->
+                        panRequest(url, at, deviceId, t)
                     }) { data ->
                         val status = data.optString("status").ifBlank { data.optString("phase") }
                         status == "PHASE_TYPE_COMPLETE" || data.optInt("error_code") == 0
@@ -668,8 +666,8 @@ class XunleiApi(
         captchaToken: String
     ): QuotaInfo? = withContext(Dispatchers.IO) {
         runCatching {
-            panCall(captchaToken, deviceId, "GET:/drive/v1/about", { t ->
-                panRequest("${XunleiConstants.PAN_BASE}/drive/v1/about", accessToken, deviceId, t)
+            panCall(captchaToken, deviceId, "GET:/drive/v1/about", accessToken, { t, at ->
+                panRequest("${XunleiConstants.PAN_BASE}/drive/v1/about", at, deviceId, t)
             }) { data ->
                 val quota = data.optJSONObject("quota")
                 QuotaInfo(
@@ -689,10 +687,10 @@ class XunleiApi(
         deviceId: String,
         captchaToken: String
     ): Boolean = withContext(Dispatchers.IO) {
-        panCall(captchaToken, deviceId, "PATCH:/drive/v1/files/$fileId", { t ->
+        panCall(captchaToken, deviceId, "PATCH:/drive/v1/files/$fileId", accessToken, { t, at ->
             panRequestM(
                 "${XunleiConstants.FILES_URL}/$fileId",
-                accessToken, deviceId, t, "PATCH",
+                at, deviceId, t, "PATCH",
                 JSONObject().put("name", name).toString()
             )
         }) { data -> data.optString("id").isNotBlank() }
@@ -706,10 +704,10 @@ class XunleiApi(
         deviceId: String,
         captchaToken: String
     ): String? = withContext(Dispatchers.IO) {
-        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchMove", { t ->
+        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchMove", accessToken, { t, at ->
             panRequestM(
                 XunleiConstants.MOVE_URL,
-                accessToken, deviceId, t, "POST",
+                at, deviceId, t, "POST",
                 JSONObject()
                     .put("ids", JSONArray().apply { fileIds.forEach { put(it) } })
                     .put("to", JSONObject().put("parent_id", toParentId).put("space", ""))
@@ -735,10 +733,10 @@ class XunleiApi(
         captchaToken: String,
         passCode: String = ""
     ): ShareInfo? = withContext(Dispatchers.IO) {
-        panCall(captchaToken, deviceId, "POST:/drive/v1/share", { t ->
+        panCall(captchaToken, deviceId, "POST:/drive/v1/share", accessToken, { t, at ->
             panRequestM(
                 XunleiConstants.SHARE_CREATE_URL,
-                accessToken, deviceId, t, "POST",
+                at, deviceId, t, "POST",
                 JSONObject()
                     .put("file_ids", JSONArray().apply { fileIds.forEach { put(it) } })
                     .put("share_to", "copy")
@@ -771,10 +769,10 @@ class XunleiApi(
         deviceId: String,
         captchaToken: String
     ): Boolean = withContext(Dispatchers.IO) {
-        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchTrash", { t ->
+        panCall(captchaToken, deviceId, "POST:/drive/v1/files:batchTrash", accessToken, { t, at ->
             panRequestM(
                 XunleiConstants.TRASH_URL,
-                accessToken, deviceId, t, "POST",
+                at, deviceId, t, "POST",
                 JSONObject()
                     .put("ids", JSONArray().apply { fileIds.forEach { put(it) } })
                     .put("space", "")
@@ -812,8 +810,7 @@ class XunleiApi(
         accessToken: String,
         deviceId: String,
         captchaToken: String,
-        body: String? = null,
-        preferCachedToken: Boolean = true
+        body: String? = null
     ): Request {
         val builder = Request.Builder()
             .url(url)
@@ -824,10 +821,9 @@ class XunleiApi(
             .header("Origin", "https://pan.xunlei.com")
             .header("Referer", "https://pan.xunlei.com/")
         if (accessToken.isNotBlank()) {
-            // 登录态优先用刷新后的 currentAccessToken，避免闭包里的旧值。
-            // preferCachedToken=false 时只认传进来的 token（校验「另一份还没落库的凭据」时必须这样）
-            val bearer = if (preferCachedToken) currentAccessToken.ifBlank { accessToken } else accessToken
-            builder.header("Authorization", "Bearer $bearer")
+            // 只用本请求显式传入的 token。多账号下载时每个请求带各自的凭证，
+            // 绝不读实例级全局 token（否则 A 账号凭证被 B 账号覆盖，P0-2）。
+            builder.header("Authorization", "Bearer $accessToken")
         }
         // ktdown 适配：游客态 captcha_token 由网页通道本地签名换取，pan 接口会拿
         // X-Client-Id 与 token 里的 client_id 比对；缺这个头一律回 captcha_invalid /
@@ -856,7 +852,7 @@ class XunleiApi(
             .header("Origin", "https://pan.xunlei.com")
             .header("Referer", "https://pan.xunlei.com/")
         if (accessToken.isNotBlank()) {
-            builder.header("Authorization", "Bearer ${currentAccessToken.ifBlank { accessToken }}")
+            builder.header("Authorization", "Bearer $accessToken")
         }
         if (captchaToken.isNotBlank()) builder.header("X-Captcha-Token", captchaToken)
         val rb = body?.toRequestBody(jsonMediaType) ?: "{}".toRequestBody(jsonMediaType)
@@ -872,9 +868,10 @@ class XunleiApi(
         captchaToken: String,
         deviceId: String,
         action: String,
-        build: (String) -> Request,
+        accessToken: String,
+        build: (String, String) -> Request,
         parse: (JSONObject) -> T
-    ): T = panCallInternal(captchaToken, deviceId, action, false, build, parse)
+    ): T = panCallInternal(captchaToken, deviceId, action, accessToken, false, build, parse)
 
     /**
      * 游客模式的 pan 调用（没有 access_token）：不写 Authorization（带上失效的 `Bearer `
@@ -888,9 +885,9 @@ class XunleiApi(
         captchaToken: String,
         deviceId: String,
         action: String,
-        build: (String) -> Request,
+        build: (String, String) -> Request,
         parse: (JSONObject) -> T
-    ): T = panCallInternal(captchaToken, deviceId, action, true, build, parse)
+    ): T = panCallInternal(captchaToken, deviceId, action, "", true, build, parse)
 
     /**
      * 游客 captcha：本地签名 → captcha/init 换 token，按 (deviceId, action) 缓存到过期。
@@ -915,8 +912,9 @@ class XunleiApi(
         captchaToken: String,
         deviceId: String,
         action: String,
+        accessToken: String,
         anonymous: Boolean,
-        build: (String) -> Request,
+        build: (String, String) -> Request,
         parse: (JSONObject) -> T
     ): T {
         // 网页账号的 captcha 只有 300s：缓存里过期的绝不再用，直接换新的（本地签名，几百毫秒）。
@@ -929,8 +927,11 @@ class XunleiApi(
             (cached ?: webCaptchaRefresher(deviceId, action)?.also { refreshedCaptchas[deviceId] = it })
                 ?.token ?: captchaToken
         }
+        // 本次调用的有效 token：初始为请求传入的那一份，401 刷新后仅更新到本次重试，
+        // 不写实例字段，避免多账号互相覆盖（P0-2）。
+        var effectiveToken = accessToken
         repeat(2) { attempt ->
-            val response = client.newCall(build(token)).execute()
+            val response = client.newCall(build(token, effectiveToken)).execute()
             val body = response.use { it.body?.string() ?: throw QuarkApiException("请求失败：响应为空") }
             val json = runCatching { JSONObject(body) }.getOrElse {
                 throw QuarkApiException("响应解析失败（HTTP ${response.code}）")
@@ -941,7 +942,9 @@ class XunleiApi(
                 if (!anonymous && (response.code == 401 || err == "unauthenticated") && attempt == 0) {
                     val refreshed = refreshTokenProvider(deviceId)
                     if (refreshed != null) {
-                        currentAccessToken = refreshed.first
+                        // 刷新的新 token 只用于本次重试；持久化已由 refreshTokenProvider
+                        // （refreshXunleiToken）完成，下次请求会经 access() 拿到最新值。
+                        effectiveToken = refreshed.first
                         val newCaptcha = webCaptchaRefresher(deviceId, action)
                             ?: initPanCaptcha(deviceId, action, token)?.let { PanCaptcha(it, Long.MAX_VALUE) }
                         if (newCaptcha != null) {

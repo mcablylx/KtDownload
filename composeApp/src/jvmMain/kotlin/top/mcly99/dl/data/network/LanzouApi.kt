@@ -95,8 +95,8 @@ class LanzouApi(
             val html = resp.body?.string().orEmpty()
             // 文件页里形如：url:'/doupload.php?uid=4133097', data:{ 'vei':'B1UHVFBWVQgFB1JWAFo=' }
             // uid 出现在 URL（uid=数字）；vei 带引号包裹、值为含 '=' 的 base64 —— 两者都要兼容。
-            val uid = Regex("""uid['"]?\s*[=:]\s*['"]?(\d{1,20})""").find(html)?.groupValues?.get(1)
-            val vei = Regex("""vei['"]?\s*[=:]\s*['"]?([A-Za-z0-9_\-+/=]{1,256})""").find(html)?.groupValues?.get(1)
+            val uid = LanzouPatterns.UID.find(html)?.groupValues?.get(1)
+            val vei = LanzouPatterns.VEI.find(html)?.groupValues?.get(1)
             if (uid.isNullOrBlank() || vei.isNullOrBlank()) {
                 throw IllegalStateException("蓝奏登录态无效，请重新登录")
             }
@@ -154,7 +154,7 @@ class LanzouApi(
         var body = postLogin()
         var attempt = 0
         while (attempt < 4 && body.contains("arg1=") && !body.contains("\"zt\"")) {
-            val arg1 = Regex("""arg1\s*=\s*'([0-9A-Fa-f]{40})'""").find(body)?.groupValues?.getOrNull(1)
+            val arg1 = LanzouPatterns.ARG1.find(body)?.groupValues?.getOrNull(1)
                 ?: break
             jar.getOrPut("accounts.woozooo.com") { java.util.concurrent.ConcurrentHashMap() }["acw_sc__v2"] =
                 LanzouCrypto.acwScV2(arg1)
@@ -273,7 +273,7 @@ class LanzouApi(
                 )
             )
             val text = json.optString("text")
-            if (!Regex("""^\d+$""").matches(text)) throw IllegalStateException("蓝奏未返回新文件夹信息")
+            if (!LanzouPatterns.DIGITS_ONLY.matches(text)) throw IllegalStateException("蓝奏未返回新文件夹信息")
             text
         }
 
@@ -347,11 +347,11 @@ class LanzouApi(
             html.contains("input_password") || html.contains("密码不正确")
         val isFolder = html.contains("filemoreajax") || html.contains("class=\"filemore\"") ||
             html.contains("file_more")
-        val iframeUrl = Regex("""<iframe[^>]+src=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+        val iframeUrl = LanzouPatterns.IFRAME_SRC.find(html)?.groupValues?.get(1)
             ?.let { absolutize(origin, it) }
-        val fileId = Regex("""(?:ajaxm|ajaxfile)\.php\?file=(\d+)""").find(html)?.groupValues?.get(1)
-            ?: Regex("""name=["']file["']\s+value=["'](\d+)["']""").find(html)?.groupValues?.get(1)
-            ?: Regex("""file=(\d+)""").find(html)?.groupValues?.get(1)
+        val fileId = LanzouPatterns.AJAX_PHP_FILE.find(html)?.groupValues?.get(1)
+            ?: LanzouPatterns.FILE_INPUT.find(html)?.groupValues?.get(1)
+            ?: LanzouPatterns.FILE_QUERY.find(html)?.groupValues?.get(1)
         val folderParams = if (isFolder) {
             val lx = jsVar(html, "lx")
             val fid = jsVar(html, "fid") ?: uri.path.substringAfterLast('/')
@@ -361,7 +361,7 @@ class LanzouApi(
         } else null
         val shareId = uri.path.trim('/').substringAfterLast('/').ifBlank { uri.path.trim('/') }
         // 单文件分享的展示大小：页面文本「文件大小：1.5 M」
-        val displaySize = Regex("""(?:文件大小|大小)\s*[:：]\s*([\d.]+)\s*([KMGT]?)(?:i?B)?""", RegexOption.IGNORE_CASE)
+        val displaySize = LanzouPatterns.DISPLAY_SIZE
             .find(html)?.let { parseDisplaySize("${it.groupValues[1]} ${it.groupValues[2]}") } ?: 0L
         val singleFile = if (!isFolder) {
             ShareFile(
@@ -417,8 +417,10 @@ class LanzouApi(
                         break
                     } catch (e: Exception) {
                         attempt++
-                        if (attempt > 2) throw IllegalStateException("蓝奏请求过于频繁，请稍后再试")
-                        delay(300)
+                        if (attempt > LanzouConstants.LIST_RETRY_LIMIT) {
+                            throw IllegalStateException("蓝奏请求过于频繁，请稍后再试")
+                        }
+                        delay(LanzouConstants.LIST_RETRY_DELAY_MS)
                         null
                     }
                 }
@@ -475,8 +477,8 @@ class LanzouApi(
                 }
             }
             val fileId = page.fileId
-                ?: Regex("""(?:ajaxm|ajaxfile)\.php\?file=(\d+)""").find(html)?.groupValues?.get(1)
-                ?: Regex("""file=(\d+)""").find(html)?.groupValues?.get(1)
+                ?: LanzouPatterns.AJAX_PHP_FILE.find(html)?.groupValues?.get(1)
+                ?: LanzouPatterns.FILE_QUERY.find(html)?.groupValues?.get(1)
                 ?: throw IllegalStateException("蓝奏解析失败，请确认分享链接和提取码后重试")
             // 取下载参数
             val withPwd = !pwd.isNullOrBlank()
@@ -491,7 +493,8 @@ class LanzouApi(
             fields += "action" to "downprocess"
             fields += "sign" to sign
             if (withPwd) {
-                fields += "p" to pwd!!
+                // withPwd 已保证非空；用 checkNotNull 给出可读错误，而不是裸露的 !! NPE（P2-5）
+                fields += "p" to checkNotNull(pwd) { "该链接需要提取码" }
                 fields += "kd" to "1"
             } else {
                 // 新版无密码协议：websignkey/signs 用 ajaxdata，websign 空，kd 用 kdns
@@ -618,18 +621,18 @@ class LanzouApi(
     private fun submitVerify(nodeUrl: String, html: String, shareOrigin: String): String? {
         val uri = runCatching { URI(nodeUrl) }.getOrNull() ?: return null
         // 新版确认页：data : { 'file':'<base64>','el':el,'sign':'<base64>' }
-        val dataMatch = Regex("""data\s*:\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}""", RegexOption.DOT_MATCHES_ALL)
+        val dataMatch = LanzouPatterns.DATA_OBJECT
             .findAll(html)
             .map { it.groupValues[1] }
             .firstOrNull { it.contains("'file'") || it.contains("\"file\"") }
-        val file = dataMatch?.let { Regex("""['"]?file['"]?\s*:\s*['"]([^'"]+)['"]""").find(it)?.groupValues?.get(1) }
-            ?: Regex("""name=["']file["'][^>]*value=["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+        val file = dataMatch?.let { LanzouPatterns.DATA_FILE.find(it)?.groupValues?.get(1) }
+            ?: LanzouPatterns.NAME_FILE_VALUE.find(html)?.groupValues?.get(1)
             ?: return null
-        val sign = dataMatch?.let { Regex("""['"]?sign['"]?\s*:\s*['"]([^'"]+)['"]""").find(it)?.groupValues?.get(1) }
+        val sign = dataMatch?.let { LanzouPatterns.DATA_SIGN.find(it)?.groupValues?.get(1) }
             ?: jsVar(html, "sign") ?: inputValue(html, "sign")
             ?: return null
         // 节点页面 2 秒后才显示按钮，需等同样时长再提交
-        Thread.sleep(2000)
+        Thread.sleep(LanzouConstants.CONFIRM_BUTTON_WAIT_MS)
         val ajaxUrl = runCatching { uri.resolve("ajax.php").toString() }
             .getOrDefault("${uri.scheme}://${uri.host}/ajax.php")
         val json = runCatching {
@@ -907,21 +910,21 @@ class LanzouApi(
     }
 
     private fun extractTitle(html: String): String {
-        Regex("""<title>([^<]*)</title>""").find(html)?.groupValues?.get(1)?.let { t ->
+        LanzouPatterns.TITLE.find(html)?.groupValues?.get(1)?.let { t ->
             val clean = t.replace(" - 蓝奏云", "").replace("蓝奏云", "").trim()
             if (clean.isNotBlank() && !clean.contains("密码")) return clean
         }
-        Regex("""class=["']n["']>([^<]+)<""").find(html)?.groupValues?.get(1)?.let { return it.trim() }
-        Regex("""var\s+filename\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)?.let { return it }
+        LanzouPatterns.FILENAME_CLASS_N.find(html)?.groupValues?.get(1)?.let { return it.trim() }
+        LanzouPatterns.VAR_FILENAME.find(html)?.groupValues?.get(1)?.let { return it }
         return ""
     }
 
     private fun jsVar(html: String, name: String): String? =
-        Regex("""(?:(?:var|let|const)\s+)?$name\s*=\s*['"]([^'"]*)['"]""").find(html)?.groupValues?.get(1)
+        LanzouPatterns.jsVarString(name).find(html)?.groupValues?.get(1)
 
     /** 读取未加引号的 JS 变量值（如 `var kdns = 0`）。 */
     private fun jsVarRaw(html: String, name: String): String? =
-        Regex("""(?:var|let|const)\s+$name\s*=\s*([^;,\n\r]+)""").find(html)?.groupValues?.get(1)
+        LanzouPatterns.jsVarRaw(name).find(html)?.groupValues?.get(1)
             ?.trim()?.trim('\'', '"')
 
     /**
@@ -931,14 +934,14 @@ class LanzouApi(
     private fun resolveAjaxUrl(html: String, origin: String, fileId: String, withPwd: Boolean): String {
         val candidate = jsVar(html, "domain1")?.takeIf { it.contains("/ajax") }
             ?: jsVar(html, "domain2")?.takeIf { it.contains("/ajax") }
-            ?: Regex("""https?://[^'"\s]+/(?:ajaxm|ajaxfile)\.php\?file=\d+""").find(html)?.value
+            ?: LanzouPatterns.AJAX_URL_ABS.find(html)?.value
         if (!candidate.isNullOrBlank()) return candidate
         return if (withPwd) "$origin/ajaxfile.php?file=$fileId" else "$origin/ajaxm.php?file=$fileId"
     }
 
     private fun inputValue(html: String, name: String): String? =
-        Regex("""<input[^>]*name=["']$name["'][^>]*value=["']([^"']*)["']""").find(html)?.groupValues?.get(1)
-            ?: Regex("""<input[^>]*value=["']([^"']*)["'][^>]*name=["']$name["']""").find(html)?.groupValues?.get(1)
+        LanzouPatterns.inputValueNameFirst(name).find(html)?.groupValues?.get(1)
+            ?: LanzouPatterns.inputValueFirst(name).find(html)?.groupValues?.get(1)
 
     private fun absolutize(base: String, target: String): String {
         if (target.startsWith("http://") || target.startsWith("https://")) return target
@@ -950,7 +953,7 @@ class LanzouApi(
     private fun parseDisplaySize(text: String): Long {
         val t = text.trim()
         if (t.isEmpty()) return 0L
-        val m = Regex("""([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE).find(t) ?: return 0L
+        val m = LanzouPatterns.SIZE_TEXT.find(t) ?: return 0L
         val value = m.groupValues[1].toDoubleOrNull() ?: return 0L
         val unit = m.groupValues[2].uppercase()
         val factor = when (unit) {
@@ -965,4 +968,58 @@ class LanzouApi(
 
     private fun firstNonBlank(vararg values: String): String =
         values.firstOrNull { !it.isNullOrBlank() }?.trim().orEmpty()
+}
+
+/**
+ * 蓝奏页面解析用的预编译正则（P3-2）。
+ *
+ * 这些模式原先写在函数体内，`Regex(...)` 每次调用都会重新编译：批量取链时
+ * 「列表 → 分享页 → 确认页 → 直链」一轮要解析几十次，正则编译就成了可观的开销。
+ * 固定模式提到这里预编译；按变量名动态构造的几条用 [dynamic] 按名缓存
+ * （名字集合来自代码里的字面量，规模很小）。
+ */
+private object LanzouPatterns {
+
+    val UID = Regex("""uid['"]?\s*[=:]\s*['"]?(\d{1,20})""")
+    val VEI = Regex("""vei['"]?\s*[=:]\s*['"]?([A-Za-z0-9_\-+/=]{1,256})""")
+    val ARG1 = Regex("""arg1\s*=\s*'([0-9A-Fa-f]{40})'""")
+    val DIGITS_ONLY = Regex("""^\d+$""")
+
+    val IFRAME_SRC = Regex("""<iframe[^>]+src=["']([^"']+)["']""")
+    val AJAX_PHP_FILE = Regex("""(?:ajaxm|ajaxfile)\.php\?file=(\d+)""")
+    val FILE_INPUT = Regex("""name=["']file["']\s+value=["'](\d+)["']""")
+    val FILE_QUERY = Regex("""file=(\d+)""")
+    val AJAX_URL_ABS = Regex("""https?://[^'"\s]+/(?:ajaxm|ajaxfile)\.php\?file=\d+""")
+
+    val DISPLAY_SIZE = Regex("""(?:文件大小|大小)\s*[:：]\s*([\d.]+)\s*([KMGT]?)(?:i?B)?""", RegexOption.IGNORE_CASE)
+    val SIZE_TEXT = Regex("""([\d.]+)\s*([KMGT]?)""", RegexOption.IGNORE_CASE)
+
+    val DATA_OBJECT =
+        Regex("""data\s*:\s*\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}""", RegexOption.DOT_MATCHES_ALL)
+    val DATA_FILE = Regex("""['"]?file['"]?\s*:\s*['"]([^'"]+)['"]""")
+    val DATA_SIGN = Regex("""['"]?sign['"]?\s*:\s*['"]([^'"]+)['"]""")
+    val NAME_FILE_VALUE = Regex("""name=["']file["'][^>]*value=["']([^"']+)["']""")
+
+    val TITLE = Regex("""<title>([^<]*)</title>""")
+    val FILENAME_CLASS_N = Regex("""class=["']n["']>([^<]+)<""")
+    val VAR_FILENAME = Regex("""var\s+filename\s*=\s*['"]([^'"]+)['"]""")
+
+    /** 按变量名缓存的动态模式：key 前缀区分「带引号/裸值」「input 两种属性顺序」 */
+    private val dynamic = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+
+    fun jsVarString(name: String): Regex = dynamic.getOrPut("s:$name") {
+        Regex("""(?:(?:var|let|const)\s+)?${Regex.escape(name)}\s*=\s*['"]([^'"]*)['"]""")
+    }
+
+    fun jsVarRaw(name: String): Regex = dynamic.getOrPut("r:$name") {
+        Regex("""(?:var|let|const)\s+${Regex.escape(name)}\s*=\s*([^;,\n\r]+)""")
+    }
+
+    fun inputValueNameFirst(name: String): Regex = dynamic.getOrPut("i1:$name") {
+        Regex("""<input[^>]*name=["']${Regex.escape(name)}["'][^>]*value=["']([^"']*)["']""")
+    }
+
+    fun inputValueFirst(name: String): Regex = dynamic.getOrPut("i2:$name") {
+        Regex("""<input[^>]*value=["']([^"']*)["'][^>]*name=["']${Regex.escape(name)}["']""")
+    }
 }

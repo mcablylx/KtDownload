@@ -17,8 +17,9 @@ import okio.BufferedSink
 /**
  * 诊断模式的网络日志（挂在 `HttpClients` 的 api / download 两个客户端上）。
  *
- * 记什么：方法、URL（**经过 `LogRedactor.url` 脱敏**，token/cookie 不会进文件）、状态码、耗时、
- * 请求体/响应体**摘要**（各截断到 1.5KB）。
+ * 记什么：方法、URL、状态码、耗时、请求体/响应体**摘要**（各截断到 1.5KB）。
+ * URL 的 query 由 [DiagnosticLog.network] 统一去掉；请求体里的敏感字段（密码、
+ * token、secret 等）由 [redactSensitiveBody] 脱敏后才交给日志，绝不落明文（P1-4）。
  *
  * ★ 请求体/响应体的记录条件是**刻意收窄**的（与上游一致）：只有
  *   ① HTTP 状态码不是 200/206，或 ② 直接抛异常（连接失败/超时/解析错误）时才记 body。
@@ -78,8 +79,20 @@ class DiagnosticNetworkInterceptor : Interceptor {
             val tee = TeeRequestBody(body)
             // 立刻走一遍 writeTo 把内容抓进内存（同一次请求里 OkHttp 还会再调一次，用的是缓存副本）
             tee.writeTo(Buffer())
-            tee.captured()
+            redactSensitiveBody(tee.captured())
         }.getOrNull()
+    }
+
+    /**
+     * 把请求体里的敏感字段值替换为 `***`，覆盖 JSON 与 form-urlencoded 两种形态。
+     *
+     * 登录 body 常含明文 password / refresh_token / access_token；诊断模式日志会落盘，
+     * 不脱敏等于把用户凭证写进文件（P1-4）。命中字段名大小写不敏感。
+     */
+    internal fun redactSensitiveBody(text: String): String {
+        var out = JSON_SECRET.replace(text) { "${it.groupValues[1]}\"***\"" }
+        out = FORM_SECRET.replace(out) { "${it.groupValues[1]}***" }
+        return out
     }
 
     /**
@@ -111,5 +124,21 @@ class DiagnosticNetworkInterceptor : Interceptor {
 
         /** 超过这个长度的请求体不复制内容（大文件上传场景） */
         const val MAX_CAPTURED_BODY = 64L * 1024
+
+        /** 需要在日志里脱敏的字段名（大小写不敏感，覆盖各网盘登录/刷新字段） */
+        private const val SECRET_KEYS =
+            "password|passwd|pwd|passcode|refresh_token|access_token|id_token|client_secret|secret|token|api_?key|authorization|bdstoken|stoken|session|sekey"
+
+        /** JSON 形态："password":"xxx" / "token":123 */
+        private val JSON_SECRET = Regex(
+            """("(?:$SECRET_KEYS)"\s*:\s*)("(?:[^"\\]|\\.)*"|[\w.+/-]+)""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        /** form-urlencoded 形态：password=xxx（保留 &/? 分隔符，避免把参数粘连） */
+        private val FORM_SECRET = Regex(
+            """((?:^|[&?])(?:$SECRET_KEYS)=)([^&]*)""",
+            RegexOption.IGNORE_CASE,
+        )
     }
 }
