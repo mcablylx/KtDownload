@@ -678,13 +678,18 @@ class AppViewModel {
      * @param silent true 表示启动时的后台静默检查：不弹「已是最新」提示，
      *   只在发现新版本时显示对话框与侧边栏角标；false 表示用户手动点击，任何结果都给反馈。
      */
+    /** 单飞：连点「检查更新」或启动静默检查并发时，后一次先取消前一次，避免结果互相覆盖（P1-6） */
+    private var updateCheckJob: kotlinx.coroutines.Job? = null
+
     fun checkForUpdate(silent: Boolean = false) {
         if (updateDownloading) return
-        scope.launch {
+        updateCheckJob?.cancel()
+        updateCheckJob = scope.launch {
             if (!silent) showUpdateStatus(UpdateStatus.CHECKING)
             val info = runCatching { updateChecker.check(APP_VERSION) }
                 .onFailure { AppLogger.warn("Update", "检查更新失败: ${it.message}", it) }
                 .getOrNull()
+            if (!isActive) return@launch // 已被更新的检查取代，不要写回状态
             if (info != null) {
                 updateInfo = info
                 updateAvailable = true
@@ -703,9 +708,12 @@ class AppViewModel {
         updateProgress = 0f
         scope.launch {
             try {
-                val file = updateDownloader.download(info.asset, onProgress = { p ->
-                    updateProgress = p.fraction
-                })
+                val file = updateDownloader.download(
+                    asset = info.asset,
+                    onProgress = { p -> updateProgress = p.fraction },
+                    // GitHub Release 的 digest（sha256:xxx）；无 digest 的旧 Release 回退 size 校验
+                    expectedSha256 = info.asset.sha256OrNull(),
+                )
                 AppLogger.info("Update", "下载完成，准备打开: ${file.fileName}")
                 updateInfo = null
                 updateDownloading = false

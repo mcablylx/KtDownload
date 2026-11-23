@@ -40,6 +40,8 @@ class GitHubApi(
      */
     var onUnauthorized: (() -> Unit)? = null
 
+    /** 401 只提示一次；多个并发请求会同时读到它，必须可见性可见（D 延伸） */
+    @Volatile
     private var unauthorizedNotified = false
 
     /** 统一检查响应码：401 → 清空缓存（失败条目会缓存 1 分钟，不清会让「修好之后」仍失败）并通知上层 */
@@ -302,7 +304,8 @@ class GitHubApi(
                             downloadUrl = a.optString("browser_download_url"),
                             size = a.optLong("size"),
                             contentType = a.optString("content_type").ifBlank { null },
-                            updatedAt = a.optString("updated_at").ifBlank { null }
+                            updatedAt = a.optString("updated_at").ifBlank { null },
+                            digest = a.optString("digest").ifBlank { null }
                         )
                     )
                 }

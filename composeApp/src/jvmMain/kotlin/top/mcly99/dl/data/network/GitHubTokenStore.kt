@@ -39,12 +39,14 @@ object GitHubTokenStore {
      * 下游注入点：由 AppViewModel 接到 [CloudDriveAccountStore]，使内存态与落盘态同源。
      * 未注入时退回共享的加密存储（返回 null 表示「未配置」）。
      */
+    @Volatile
     var tokenReader: (() -> String?)? = null
 
     /**
      * 下游注入点：写入/清除 Token。返回是否写入成功。
      * 未注入时退回共享的加密存储。
      */
+    @Volatile
     var tokenWriter: ((String?) -> Boolean)? = null
 
     private val shared get() = CloudDriveAccountStore.sharedStorage

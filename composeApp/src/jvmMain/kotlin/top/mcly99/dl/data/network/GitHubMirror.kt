@@ -146,6 +146,7 @@ object GitHubMirror {
      * 下游新增：可替换的偏好存储。默认指向用户的 ~/.mclydownload；
      * jvmTest 注入临时目录，避免测试读写真实用户配置。
      */
+    @Volatile
     var prefs: ShimPrefs = AppContext.miscPrefs
 
     /**
@@ -190,7 +191,8 @@ object GitHubMirror {
 
     /** 当前最快的预选镜像：优先用本次测速结果，其次用上次持久化的结果 */
     fun fastestPrefix(): String? =
-        snapshot.value.probes.filter { it.ok }.maxByOrNull { it.speedBps!! }?.prefix
+        snapshot.value.probes.mapNotNull { p -> p.speedBps?.let { bps -> p to bps } }
+            .maxByOrNull { it.second }?.first?.prefix
             ?: prefs.get(KEY_FASTEST, null)?.takeIf { it.isNotBlank() }
 
     /**
@@ -269,7 +271,8 @@ object GitHubMirror {
      */
     internal fun applyProbeResults(results: List<Probe>) {
         _snapshot.update { Snapshot(testing = false, probes = results) }
-        val fastest = results.filter { it.ok }.maxByOrNull { it.speedBps!! }
+        val fastest = results.mapNotNull { p -> p.speedBps?.let { bps -> p to bps } }
+            .maxByOrNull { it.second }?.first
         prefs.put(KEY_FASTEST, fastest?.prefix.orEmpty())
         prefs.put(KEY_PROBED_AT, clock().toString())
         val summary = results.joinToString {

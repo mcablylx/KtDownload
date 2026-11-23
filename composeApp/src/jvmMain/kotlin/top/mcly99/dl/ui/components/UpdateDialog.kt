@@ -25,8 +25,9 @@ import top.mcly99.dl.theme.UpdateStrings
  * 无内部状态：显示与否、下载进度都由调用方（AppViewModel）注入，
  * 与项目里 ConfirmDialog / AddTaskDialog 的模式一致。
  *
- * @param downloading 是否正在下载；为 true 时显示进度条并禁用「立即更新」。
+ * @param downloading 是否正在下载；为 true 时显示进度条，主按钮切换为「取消下载」。
  * @param progress 下载进度 0f..1f；负数表示总量未知（显示不确定进度条）。
+ * @param onCancel 取消正在进行的下载；下载中主按钮与 Esc 之外的关闭都走这里。
  */
 @Composable
 fun UpdateDialog(
@@ -37,12 +38,14 @@ fun UpdateDialog(
     progress: Float,
     onUpdate: () -> Unit,
     onLater: () -> Unit,
+    onCancel: () -> Unit,
     onOpenRelease: () -> Unit,
 ) {
     if (!open || info == null) return
 
     AlertDialog(
-        onDismissRequest = onLater,
+        // 下载中禁用 Esc/遮罩关闭：否则弹窗消失但下载在后台继续，完成后自动安装/退出（P1-1）
+        onDismissRequest = if (downloading) { {} } else onLater,
         icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null, tint = FlowDownColors.Primary) },
         title = { Text(strings.newVersionTitle, color = FlowDownColors.Foreground) },
         text = {
@@ -79,18 +82,19 @@ fun UpdateDialog(
         // 均为 36dp 高、6dp 圆角（见 CompactButton）。
         confirmButton = {
             CompactButton(
-                text = strings.updateNow,
-                onClick = onUpdate,
-                enabled = !downloading,
+                text = if (downloading) strings.cancelDownload else strings.updateNow,
+                onClick = if (downloading) onCancel else onUpdate,
                 primary = true,
             )
         },
         dismissButton = {
-            CompactButton(
-                text = strings.later,
-                onClick = onLater,
-                enabled = !downloading,
-            )
+            // 下载中不显示「稍后」：避免与后台下载状态脱节
+            if (!downloading) {
+                CompactButton(
+                    text = strings.later,
+                    onClick = onLater,
+                )
+            }
         },
         containerColor = FlowDownColors.Card,
         iconContentColor = FlowDownColors.Primary,

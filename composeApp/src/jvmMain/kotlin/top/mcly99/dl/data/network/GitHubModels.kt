@@ -76,5 +76,10 @@ data class GitHubAsset(
     val size: Long,
     val contentType: String?,
     /** 资产更新时间（API updated_at，ISO8601，可能为 null） */
-    val updatedAt: String? = null
-)
+    val updatedAt: String? = null,
+    /** GitHub Release API 的 digest（形如 `sha256:xxx`）；旧 Release 可能没有 */
+    val digest: String? = null
+) {
+    /** 从 [digest] 提取纯 SHA-256 十六进制（去掉 `sha256:` 前缀），无则返回 null */
+    fun sha256OrNull(): String? = digest?.removePrefix("sha256:")?.takeIf { it.isNotBlank() }
+}

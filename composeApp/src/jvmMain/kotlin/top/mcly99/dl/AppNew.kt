@@ -345,6 +345,7 @@ fun AppNew(
                     progress = viewModel.updateProgress,
                     onUpdate = viewModel::downloadAndInstall,
                     onLater = viewModel::dismissUpdateDialog,
+                    onCancel = viewModel::cancelUpdateDownload,
                     onOpenRelease = {
                         viewModel.updateInfo?.releaseUrl?.let { url ->
                             runCatching {

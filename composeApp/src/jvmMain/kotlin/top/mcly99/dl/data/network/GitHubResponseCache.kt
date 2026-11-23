@@ -56,11 +56,12 @@ object GitHubResponseCache {
             // 过期淘汰
             cache.remove(key)
         }
-        // 2) in-flight 去重：已有同 key 请求在飞，等待其结果
-        inFlight[key]?.let { return it.await() }
-        // 3) 自己发起请求
+        // 2+3) in-flight 去重：check-then-act 必须原子（P1-E4）。
+        // putIfAbsent 返回已有 Deferred 时复用它、本次不再发请求；
+        // 否则由本次登记并负责 fetch。GitHub 匿名限额 60/h，重复请求会加剧限流。
         val deferred = CompletableDeferred<String?>()
-        inFlight[key] = deferred
+        val existing = inFlight.putIfAbsent(key, deferred)
+        if (existing != null) return existing.await()
         val result = try {
             fetch()
         } catch (ce: CancellationException) {
