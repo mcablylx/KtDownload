@@ -123,10 +123,7 @@ class XunleiResolveRepository(
             val result = api.getShare(shareId, effectivePwd, access, deviceIdOrGuest(), captcha())
                 ?: throw IllegalStateException("未获取到分享信息")
             ShareSession(shareId, result.passCodeToken, result.title)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     override suspend fun listFiles(session: ShareSession, dirFid: String, cookie: String): Result<List<ShareFile>> =
         runCatching {
@@ -156,20 +153,14 @@ class XunleiResolveRepository(
                 pages++
             } while (pageToken.isNotBlank() && pages < 100)
             files
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     override suspend fun ensureTempDir(cookie: String): Result<String> = runCatching {
         // 临时目录必须建在「本次取链那个账号」的网盘里：多账号下载时各账号各自转存、各自清理
         val id = identityFor(cookie)
         api.ensureTempDir(id.token, id.deviceId, id.captcha)
             ?: throw IllegalStateException("创建临时目录失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun transferFile(
         session: ShareSession,
@@ -197,19 +188,13 @@ class XunleiResolveRepository(
             captchaToken = id.captcha
         ) ?: throw IllegalStateException("转存失败")
         newId
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> = runCatching {
         val id = identityFor(cookie)
         api.getFileDetail(fid, id.token, id.deviceId, id.captcha)
             ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 批量转存 / 批量下载前的整批空间预算校验：只查一次配额，不足时抛出（迅雷转存占用目标账号空间） */
     override suspend fun ensureBatchSpace(sizes: List<Long>, credential: String): Boolean =
@@ -236,8 +221,5 @@ class XunleiResolveRepository(
         // 拿到直链后立即删除临时转存的文件（对齐官方 batchDelete；失败不阻断下载）
         runCatching { api.batchDelete(listOf(savedFid), id.token, id.deviceId, id.captcha) }
         link
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 }

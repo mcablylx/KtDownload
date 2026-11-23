@@ -34,10 +34,7 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
             val token = api.getShareToken(parsed.shareId, effectivePwd, cookie)
                 ?: throw IllegalStateException("未获取到分享凭证")
             ShareSession(parsed.shareId, token.stoken, token.title)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
     }
 
     override suspend fun listFiles(session: ShareSession, dirFid: String, cookie: String): Result<List<ShareFile>> =
@@ -59,10 +56,7 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
                 page++
             }
             all.values.toList()
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     override suspend fun ensureTempDir(cookie: String): Result<String> = runCatching {
         val rootFiles = api.getFileList(UCConstants.DEFAULT_PDIR_FID, cookie)
@@ -70,10 +64,7 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
         rootFiles.firstOrNull { it.isdir && it.fname == UCConstants.TEMP_DIR_NAME }?.fid
             ?: api.createFolder(UCConstants.TEMP_DIR_NAME, UCConstants.DEFAULT_PDIR_FID, cookie)
             ?: throw IllegalStateException("创建临时目录失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun transferFile(
         session: ShareSession,
@@ -98,18 +89,12 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
         ) ?: throw IllegalStateException("转存失败")
         api.pollTask(taskId, cookie)
             ?: throw IllegalStateException("转存超时，请稍后重试")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> = runCatching {
         api.getDownloadLink(fid, cookie)
             ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 批量转存前的整批空间预算校验：只查一次配额，不足时抛出（UC 转存同样占用目标账号空间） */
     override suspend fun ensureBatchSpace(sizes: List<Long>, credential: String): Boolean =
@@ -152,10 +137,7 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
             pwdId = session.shareId,
             cookie = cookie
         ) ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 游客取链（未登录）：与登录态同一条 download 接口，只是不带账号 Cookie，
@@ -172,8 +154,5 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
             stoken = session.stoken,
             pwdId = session.shareId
         ) ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 }

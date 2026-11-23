@@ -62,7 +62,9 @@ class ShutdownAfterCompleteController(
             armed = true
             return
         }
-        val queueDrained = tasks.isNotEmpty() && tasks.none { it.status == DownloadStatus.PAUSED }
+        // 旧实现要求「列表非空」，于是用户手动清空列表后反而不关机（D 延伸）。
+        // 真正要判断的是「没有排队中的任务」：列表空了也就没有东西可等了。
+        val queueDrained = tasks.none { it.status == DownloadStatus.PAUSED }
         if (armed && queueDrained && countdown == null) startCountdown()
     }
 

@@ -8,6 +8,7 @@
  */
 package top.mcly99.dl.data.repository
 
+import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.data.network.Pan115Api
 import top.mcly99.dl.data.network.Pan115Constants
 import top.mcly99.dl.data.network.ShareLinkParser
@@ -48,10 +49,7 @@ class Pan115ResolveRepository(private val api: Pan115Api) : ShareResolveReposito
                 stoken = Pan115Constants.encodeShareToken(receiveCode, page.userId),
                 title = page.title.takeIf { it.isNotBlank() } ?: parsed.shareId
             )
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
     }
 
     override suspend fun listFiles(
@@ -82,10 +80,7 @@ class Pan115ResolveRepository(private val api: Pan115Api) : ShareResolveReposito
             if (done) break
         }
         all
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 确保「MclyDownload临时转存」下的**唯一子目录**存在，返回子目录 cid。
@@ -105,10 +100,7 @@ class Pan115ResolveRepository(private val api: Pan115Api) : ShareResolveReposito
         val subName = "${Pan115Constants.TEMP_SUBDIR_PREFIX}${System.nanoTime()}"
         api.createDir(tempRoot, subName, cookie)
             ?: throw IllegalStateException("创建115临时转存目录失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 下载完成（或用户取消）后清理：删掉本次转存的唯一子目录，里面的转存文件一并进回收站 */
     override suspend fun cleanupTempDir(dirFid: String, cookie: String) {
@@ -146,17 +138,14 @@ class Pan115ResolveRepository(private val api: Pan115Api) : ShareResolveReposito
         api.receiveShare(session.shareId, receiveCode, file.fid, targetCid, cookie)
         waitNewFid(targetCid, file.fname, cookie)
             ?: throw IllegalStateException("转存已完成，但未在目标目录找到文件，请到115网盘查看")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 转存后列表有延迟，最多重试 5 次、每次间隔 500ms，按文件名找回新文件 */
     private suspend fun waitNewFile(cid: String, name: String, cookie: String): ShareFile? {
         val base = name.substringBeforeLast('.', name)
         val ext = name.substringAfterLast('.', "")
         repeat(5) { index ->
-            if (index > 0) delay(500)
+            if (index > 0) delay(AppConstants.RESOLVE_RETRY_BACKOFF_MS)
             val page = runCatching {
                 api.listFiles(cid, cookie, offset = 0, limit = Pan115Constants.PAGE_LIMIT)
             }.getOrNull() ?: return@repeat
@@ -211,10 +200,7 @@ class Pan115ResolveRepository(private val api: Pan115Api) : ShareResolveReposito
             }
         // 文件名以列表为准（downurl 的 fn 偶发为空，会 fallback 成 file_id）
         link.copy(filename = file.fname.ifBlank { link.filename })
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 分享文件的「电脑端」通道：转存到临时子目录 → 按文件名认领新文件（拿到 pickcode）→

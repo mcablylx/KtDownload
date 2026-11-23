@@ -8,6 +8,8 @@
  */
 package top.mcly99.dl.data.repository
 
+import top.mcly99.dl.utils.AppConstants
+import top.mcly99.dl.data.network.LANZOU_UUID_REGEX
 import top.mcly99.dl.data.network.ILanzouApi
 import top.mcly99.dl.data.network.ILanzouConstants
 import top.mcly99.dl.data.network.ShareLinkParser
@@ -91,7 +93,7 @@ class ILanzouResolveRepository(
             var done = false
             repeat(30) {
                 if (done) return@repeat
-                delay(500)
+                delay(AppConstants.RESOLVE_RETRY_BACKOFF_MS)
                 if (runCatching { api.transferCount(appToken, uuid(), key) }.getOrDefault(0) == 1) done = true
             }
             if (!done) throw IllegalStateException("蓝奏优享仍在处理转存，请稍后刷新列表")
@@ -123,5 +125,5 @@ class ILanzouResolveRepository(
         return value
     }
 
-    private fun isValidUuid(uuid: String): Boolean = Regex("^[A-Za-z0-9_-]{8,128}$").matches(uuid)
+    private fun isValidUuid(uuid: String): Boolean = LANZOU_UUID_REGEX.matches(uuid)
 }

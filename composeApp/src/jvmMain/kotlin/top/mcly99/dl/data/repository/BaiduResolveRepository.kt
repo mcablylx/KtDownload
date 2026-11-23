@@ -8,6 +8,7 @@
  */
 package top.mcly99.dl.data.repository
 
+import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.data.network.BaiduApi
 import top.mcly99.dl.data.network.BaiduApiException
 import top.mcly99.dl.data.network.BaiduConstants
@@ -31,15 +32,20 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
 
     private val TAG = "BaiduResolve"
 
-    /** surl -> sekey（verify 返回的 randsk） */
-    private val sekeys = mutableMapOf<String, String>()
+    // 会话缓存按「账号 + surl」二维隔离：多账号解析同一个分享时不互相覆盖 sekey/shareid/workDir（P1-5）。
+    // 账号用完整 Cookie 字符串作 key（不用 hashCode，避免碰撞）；全部用 ConcurrentHashMap 支撑并发。
 
-    /** surl -> (share_id, uk)，由列表接口返回（转存必需） */
-    private val shareInfos = mutableMapOf<String, Pair<String, String>>()
+    /** (cookie|surl) -> sekey（verify 返回的 randsk） */
+    private val sekeys = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    /** 已探明可用的转存目录（按 Cookie 记忆），同一账号后续文件直接复用，避免每个文件重跑兜底 */
-    private var workDir: String? = null
-    private var workDirCookie: Int = 0
+    /** (cookie|surl) -> (share_id, uk)，由列表接口返回（转存必需） */
+    private val shareInfos = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String>>()
+
+    /** 账号 -> 已探明可用的转存目录，同一账号后续文件直接复用，避免每个文件重跑兜底 */
+    private val workDirs = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** 缓存 key：账号凭证 + surl，两个维度缺一不可 */
+    private fun keyOf(cookie: String, surl: String): String = "$cookie|$surl"
 
     override suspend fun createSession(link: String, pwd: String?, cookie: String): Result<ShareSession> =
         runCatching {
@@ -54,22 +60,19 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             } else {
                 api.verifyShare(surl, effectivePwd, cookie)
             }
-            sekeys[surl] = sekey
+            sekeys[keyOf(cookie, surl)] = sekey
             // 转存必须先拿到 shareid（数字 ID）与分享者 uk：链接里的 surl 只是短码，
             // 列表接口又可能不回这两个字段。这里趁解析时顺手从分享页取一次并缓存，
             // 取不到也不阻断浏览（列表仍可用），转存时再兜底重试。
             runCatching { api.shareMeta(surl, sekey, cookie) }.getOrNull()?.let {
-                shareInfos[surl] = it.shareId to it.uk
+                shareInfos[keyOf(cookie, surl)] = it.shareId to it.uk
             }
             ShareSession(surl, sekey, "")
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     override suspend fun listFiles(session: ShareSession, dirFid: String, cookie: String): Result<List<ShareFile>> =
         runCatching {
-            val sekey = session.stoken.ifBlank { sekeys[session.shareId] ?: "" }
+            val sekey = session.stoken.ifBlank { sekeys[keyOf(cookie, session.shareId)] ?: "" }
             // 顶层 dirFid 为空/"/"；子目录 dirFid 为目录 path（如 /folder）
             val all = mutableListOf<ShareFile>()
             var page = 1
@@ -82,13 +85,10 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             // 缓存 share_id/uk（转存需要）；子目录列表可能回空字段，
             // 空值不许覆盖掉解析阶段已经从分享页拿到的有效值
             if (result.shareId.isNotBlank() && result.uk.isNotBlank()) {
-                shareInfos[session.shareId] = result.shareId to result.uk
+                shareInfos[keyOf(cookie, session.shareId)] = result.shareId to result.uk
             }
             all
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     override suspend fun ensureTempDir(cookie: String): Result<String> = runCatching {
         val rootListing = runCatching { api.listDir("/", cookie) }.getOrNull()
@@ -110,10 +110,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             AppLogger.warn(TAG, "临时目录 $dir 创建后回查仍不存在，回退到根目录")
             "/"
         }
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun transferFile(
         session: ShareSession,
@@ -130,10 +127,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             shareId, uk, session.stoken, file.fid, toDirFid, cookie, surl = session.shareId,
         )
         result.fsId
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 批量转存 / 批量下载前的整批空间预算校验：只查一次配额，不足时抛出（百度转存占用目标账号空间） */
     override suspend fun ensureBatchSpace(sizes: List<Long>, credential: String): Boolean =
@@ -147,10 +141,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> = runCatching {
         val dlink = api.fileMetasDlink(fid, cookie)
         DownloadLink(fid = fid, filename = "", downloadUrl = dlink, size = 0L)
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 百度取直链：转存临时目录（自动创建，失败回退根目录）→ locatedownload 拿 appall 高速链 → 立即删除临时转存（失败不阻断） */
     override suspend fun getShareDownloadLink(
@@ -180,10 +171,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             downloadUrl = dlink,
             size = file.fsize
         )
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 免转存取链：分享签名（`/share/tplconfig`）→ `/api/sharedownload` 直接换下载地址。
@@ -198,7 +186,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
         cookie: String
     ): Result<DownloadLink> = runCatching {
         val (shareId, uk) = requireShareInfo(session, cookie)
-        val sekey = session.stoken.ifBlank { sekeys[session.shareId] ?: "" }
+        val sekey = session.stoken.ifBlank { sekeys[keyOf(cookie, session.shareId)] ?: "" }
         // 签名有两个来源：分享页里那份（浏览器自己用的，与页面 bdstoken、验证态同源）
         // 和 `/share/tplconfig` 换来的那份。前者更可信，两个都备着按序试。
         val page = runCatching { api.sharePage(session.shareId, sekey, cookie) }.getOrNull()
@@ -228,10 +216,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             downloadUrl = dlink,
             size = file.fsize,
         )
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 转存到应用自管的临时目录。
@@ -247,7 +232,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
      *  5. 确有同名项 → 删掉重转；删不掉就复用；
      *  6. 换一个全新的空目录重转（建完会回查确认，避免对着不存在的目录白转）。
      *
-     * 探明可用的目录会记在 [workDir]，同一账号后续文件直接用，避免每个文件都重跑一轮。
+     * 探明可用的目录会记在 [workDirs]（按账号隔离），同一账号后续文件直接用，避免每个文件都重跑一轮。
      */
     private suspend fun transferToTemp(
         session: ShareSession,
@@ -258,8 +243,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
         cookie: String,
     ): BaiduTransferResult {
         val errors = mutableListOf<String>()
-        val cookieTag = cookie.hashCode()
-        val baseDir = workDir?.takeIf { workDirCookie == cookieTag } ?: dirPath
+        val baseDir = workDirs[cookie] ?: dirPath
 
         // 转存的两个「身份」参数。errno=2 有一类就是它们不对，所以失败后允许用
         // 分享页重新解析到的值替换（见下面第 2 步）
@@ -279,10 +263,9 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             }
             result.exceptionOrNull()?.let { errors += (it.message ?: "未知错误") }
             val ok = result.getOrNull()
-            // 记住跑通的目录，后续文件不再重试
+            // 记住跑通的目录（按账号隔离），后续同账号文件不再重试
             if (ok != null && dir != dirPath) {
-                workDir = dir
-                workDirCookie = cookieTag
+                workDirs[cookie] = dir
             }
             return ok
         }
@@ -320,7 +303,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
                 )
                 sid = fresh.shareId
                 from = fresh.uk
-                shareInfos[session.shareId] = sid to from
+                shareInfos[keyOf(cookie, session.shareId)] = sid to from
                 attempt(baseDir)?.let { return it }
             }
         }
@@ -367,7 +350,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
     ): String? {
         repeat(attempts) { index ->
             findTransferred(dirPath, file, cookie)?.let { return it }
-            if (index < attempts - 1) delay(500)
+            if (index < attempts - 1) delay(AppConstants.RESOLVE_RETRY_BACKOFF_MS)
         }
         return null
     }
@@ -417,14 +400,15 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
      * 分享页 1 次请求。三者都拿不到才算失败——空着传下去只会换来 errno=2。
      */
     private suspend fun requireShareInfo(session: ShareSession, cookie: String): Pair<String, String> {
-        shareInfos[session.shareId]
+        val key = keyOf(cookie, session.shareId)
+        shareInfos[key]
             ?.takeIf { it.first.isNotBlank() && it.second.isNotBlank() }
             ?.let { return it }
-        val sekey = session.stoken.ifBlank { sekeys[session.shareId] ?: "" }
+        val sekey = session.stoken.ifBlank { sekeys[key] ?: "" }
         runCatching { api.listShare(session.shareId, sekey, "/", cookie) }.getOrNull()?.let { result ->
             if (result.shareId.isNotBlank() && result.uk.isNotBlank()) {
                 val info = result.shareId to result.uk
-                shareInfos[session.shareId] = info
+                shareInfos[key] = info
                 return info
             }
         }
@@ -432,7 +416,7 @@ class BaiduResolveRepository(private val api: BaiduApi) : ShareResolveRepository
             ?: throw BaiduApiException("无法获取分享 ID（shareid），分享可能已失效或需要重新解析")
         AppLogger.info(TAG, "分享元信息取自分享页：shareid=${meta.shareId} uk=${meta.uk}")
         val info = meta.shareId to meta.uk
-        shareInfos[session.shareId] = info
+        shareInfos[key] = info
         return info
     }
 }

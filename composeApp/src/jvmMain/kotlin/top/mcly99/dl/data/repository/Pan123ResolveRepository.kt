@@ -37,10 +37,7 @@ class Pan123ResolveRepository(
             val (files, _) = api.getShareFiles(parsed.shareId, sharePwd, "0", "0", 1)
             val title = files.firstOrNull()?.fname?.takeIf { it.isNotBlank() } ?: parsed.shareId
             ShareSession(shareId = parsed.shareId, stoken = sharePwd, title = title)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
     }
 
     override suspend fun listFiles(session: ShareSession, dirFid: String, cookie: String): Result<List<ShareFile>> =
@@ -56,10 +53,7 @@ class Pan123ResolveRepository(
                 page++
             } while (hasMore && page < 50)
             all
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     /** 123 分享下载无需转存（文档 §4.2） */
     override suspend fun ensureTempDir(cookie: String): Result<String> =
@@ -93,10 +87,7 @@ class Pan123ResolveRepository(
         ) ?: throw IllegalStateException("创建转存任务失败")
         api.pollCopySave(taskId, shareId, token)
             ?: throw IllegalStateException("转存超时或失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> =
         Result.failure(UnsupportedOperationException("123 分享请使用 getShareDownloadLink"))
@@ -120,8 +111,5 @@ class Pan123ResolveRepository(
         val link = api.getShareDownloadLink(session.shareId, file, token)
             ?: throw IllegalStateException("获取下载链接失败")
         link.copy(filename = file.fname.ifBlank { link.filename })
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 }

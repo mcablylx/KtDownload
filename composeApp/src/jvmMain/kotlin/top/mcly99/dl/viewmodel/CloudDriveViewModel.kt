@@ -1,5 +1,6 @@
 package top.mcly99.dl.viewmodel
 
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -258,19 +259,24 @@ class CloudDriveViewModel(
     var sortMode by mutableStateOf(CloudFileSort.NAME)
         private set
 
-    /** 搜索 + 排序后的文件列表；目录恒置顶，避免被大小排序混进文件堆 */
-    val visibleFiles: List<CloudFile>
-        get() {
-            val query = searchQuery.trim()
-            val filtered = if (query.isEmpty()) files
-            else files.filter { it.name.contains(query, ignoreCase = true) }
-            val sorted = when (sortMode) {
-                CloudFileSort.NAME -> filtered.sortedBy { it.name.lowercase() }
-                CloudFileSort.SIZE -> filtered.sortedByDescending { it.size }
-                CloudFileSort.TYPE -> filtered.sortedBy { it.name.substringAfterLast('.', "").lowercase() }
-            }
-            return sorted.sortedByDescending { it.isDir }
+    /**
+     * 搜索 + 排序后的文件列表；目录恒置顶，避免被大小排序混进文件堆。
+     *
+     * 用 derivedStateOf 缓存：旧实现是 getter，Compose 每次重组都会重跑一遍 filter + 两次排序，
+     * 进度刷新等无关状态变化也会连带重算（D 延伸）。改成派生状态后只有
+     * files / searchQuery / sortMode 变化时才重新计算。
+     */
+    val visibleFiles: List<CloudFile> by derivedStateOf {
+        val query = searchQuery.trim()
+        val filtered = if (query.isEmpty()) files
+        else files.filter { it.name.contains(query, ignoreCase = true) }
+        val sorted = when (sortMode) {
+            CloudFileSort.NAME -> filtered.sortedBy { it.name.lowercase() }
+            CloudFileSort.SIZE -> filtered.sortedByDescending { it.size }
+            CloudFileSort.TYPE -> filtered.sortedBy { it.name.substringAfterLast('.', "").lowercase() }
         }
+        sorted.sortedByDescending { it.isDir }
+    }
 
     /** 非阻断提示：取链结果、登录引导等 */
     var notice by mutableStateOf<String?>(null)

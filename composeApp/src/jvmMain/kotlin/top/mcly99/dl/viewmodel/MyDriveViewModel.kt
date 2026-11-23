@@ -267,13 +267,15 @@ class MyDriveViewModel(
      * 这里按游标续取，并按 id 去重：翻页期间若有新文件插入，同一条目可能出现在两页里。
      */
     fun loadMore() {
-        val cursor = nextCursor ?: return
-        if (loading || loadingMore) return
-        val dirId = currentDirId
-        // 记下当前代次：翻页期间用户可能切了平台 / 目录，这一页属于旧目录，绝不能拼到新列表上
-        val generation = loadGeneration
         scope.launch {
+            // 检查与置位一起放在 launch 内的第一个挂起点之前（P1-6）：
+            // 否则连点两次都会在 launch 外看到 loadingMore=false，并发翻页导致重复/错乱。
+            val cursor = nextCursor ?: return@launch
+            if (loading || loadingMore) return@launch
             loadingMore = true
+            val dirId = currentDirId
+            // 记下当前代次：翻页期间用户可能切了平台 / 目录，这一页属于旧目录，绝不能拼到新列表上
+            val generation = loadGeneration
             try {
                 val page = withContext(ioDispatcher) { api.list(ctx(), dirId, cursor) }
                 if (generation != loadGeneration) return@launch
@@ -295,7 +297,9 @@ class MyDriveViewModel(
     }
 
     fun selectAll() {
-        selectedIds = files.map { it.id }.toSet()
+        // 只选文件不选目录：单行点击目录是「打开」而非选择，全选若把目录算进去，
+        // 会让 canDelete/canMove 对目录生效，与单行交互语义不一致且可能误删整目录（P1-E3）。
+        selectedIds = files.filter { !it.isDir }.map { it.id }.toSet()
     }
 
     fun clearSelection() {
@@ -544,8 +548,11 @@ class MyDriveViewModel(
 
     /** 所有写操作共用一个外壳：串行、吞异常、给 notice，不把异常抛到 Compose 层 */
     private fun runOperation(block: suspend () -> Unit) {
-        if (busy) return
         scope.launch {
+            // 判断与置位必须一起放在 launch 内的第一个挂起点之前：
+            // Dispatchers.Main 下 launch 是 post，若判断留在 launch 外，同事件循环内
+            // 连点两次都会看到 busy=false，造成两个写操作并发（P1-6）。
+            if (busy) return@launch
             busy = true
             try {
                 block()

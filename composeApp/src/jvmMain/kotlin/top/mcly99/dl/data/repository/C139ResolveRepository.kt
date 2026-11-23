@@ -38,10 +38,7 @@ class C139ResolveRepository(private val api: C139Api) : ShareResolveRepository {
             val title = api.getOutLinkTitle(parsed.shareId)
                 ?.takeIf { it.isNotBlank() } ?: parsed.shareId
             ShareSession(parsed.shareId, passwd, title)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
     }
 
     override suspend fun listFiles(session: ShareSession, dirFid: String, cookie: String): Result<List<ShareFile>> =
@@ -58,10 +55,7 @@ class C139ResolveRepository(private val api: C139Api) : ShareResolveRepository {
                 begin += 200
             } while (batch.size == 200 && begin <= 20_000)
             all
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     /** 139 分享不需要转存/个人网盘直链，保留空实现避免误用 */
     override suspend fun ensureTempDir(cookie: String): Result<String> =
@@ -101,10 +95,7 @@ class C139ResolveRepository(private val api: C139Api) : ShareResolveRepository {
             }
         }
         newId ?: throw IllegalStateException("转存超时或失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> =
         Result.failure(UnsupportedOperationException("139 分享请使用 getShareDownloadLink"))
@@ -129,8 +120,5 @@ class C139ResolveRepository(private val api: C139Api) : ShareResolveRepository {
             ?: throw IllegalStateException("获取下载链接失败")
         // 文件名用列表里的 coName（dlFromOutLinkV3 响应不含文件名，否则会 fallback 成 coID 乱码）
         link.copy(filename = file.fname.ifBlank { link.filename })
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 }

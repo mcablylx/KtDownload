@@ -48,6 +48,9 @@ object AppConstants {
     const val PROGRESS_PUBLISH_INTERVAL_MS = 200L
     const val MAX_THREADS = 64
     const val TASK_PERSIST_DEBOUNCE_MS = 2_000L
+    /** 网盘解析的重试退避：分享链接偶发 5xx/风控时按此间隔重试 */
+    const val RESOLVE_RETRY_BACKOFF_MS = 500L
+
     /** 下载文件名上限（为同名后缀与完整路径留出余量） */
     const val MAX_DOWNLOAD_FILE_NAME_LENGTH = 180
 

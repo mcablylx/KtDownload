@@ -35,10 +35,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
             val token = api.getShareToken(parsed.shareId, effectivePwd, cookie)
                 ?: throw IllegalStateException("未获取到分享凭证")
             ShareSession(parsed.shareId, token.stoken, token.title)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
     }
 
     /** 获取指定目录下的文件列表（自动翻页取全量；服务端单页可能只返回 50 项） */
@@ -61,10 +58,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
                 page++
             }
             all.values.toList()
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { Result.failure(it) }
-        )
+        }
 
     /**
      * 确保「MclyDownload临时转存」目录存在，返回其 fid；不存在则创建。
@@ -75,10 +69,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
         rootFiles.firstOrNull { it.isdir && it.fname == QuarkConstants.TEMP_DIR_NAME }?.fid
             ?: api.createFolder(QuarkConstants.TEMP_DIR_NAME, QuarkConstants.DEFAULT_PDIR_FID, cookie)
             ?: throw IllegalStateException("创建临时目录失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 转存分享文件到临时目录，等待异步任务完成。
@@ -96,10 +87,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
     override suspend fun getDownloadLink(fid: String, cookie: String): Result<DownloadLink> = runCatching {
         api.getDownloadLink(fid, cookie)
             ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 夸克取直链（修复版，文档《夸克网盘重复获取直链失败修复》方案二）：
      *  1) 每次转存落到「MclyDownload临时转存」下的【唯一子目录 tr_<时间戳>_<随机>】，
@@ -130,10 +118,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
 
         // 不在此删除！下载完成后再删整个子目录（含文件）
         link.copy(cleanupDirFid = subDirFid)
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 免转存取链（登录态）：不建临时目录、不转存，直接把分享凭证（pwd_id / stoken / fids /
@@ -155,10 +140,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
             stoken = session.stoken,
             cookie = cookie
         ) ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /**
      * 游客取链（未登录）：不碰用户网盘 —— 不建临时目录、不转存，直接按分享参数打 download 接口，
@@ -174,10 +156,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
             shareId = session.shareId,
             stoken = session.stoken
         ) ?: throw IllegalStateException("获取下载链接失败")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 转存分享文件到用户网盘指定目录（转存功能：不删除，长期保存） */
     suspend fun saveToCloud(
@@ -220,10 +199,7 @@ class QuarkResolveRepository(private val api: QuarkApi) : ShareResolveRepository
         ) ?: throw IllegalStateException("转存失败")
         api.pollTask(taskId, cookie)
             ?: throw IllegalStateException("转存超时，请稍后重试")
-    }.fold(
-        onSuccess = { Result.success(it) },
-        onFailure = { Result.failure(it) }
-    )
+    }
 
     /** 下载完成后清理：删除临时子目录（连同其中的转存文件）；失败不阻断 */
     override suspend fun cleanupTempDir(dirFid: String, cookie: String) {

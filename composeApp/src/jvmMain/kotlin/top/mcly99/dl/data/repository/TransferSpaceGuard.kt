@@ -43,7 +43,13 @@ object TransferSpaceGuard {
             Log.d(TAG, "[$platform] 待转存内容大小未知，跳过空间校验")
             return
         }
-        val quota = runCatching { quotaProvider() }.getOrNull()
+        val result = runCatching { quotaProvider() }
+        result.exceptionOrNull()?.let { e ->
+            // 鉴权过期/网络错误：不能当成「校验通过」，记带 cause 的告警便于排查（P1-3）
+            Log.w(TAG, "[$platform] 配额查询失败，跳过本次前置校验: ${e.message}", e)
+            return
+        }
+        val quota = result.getOrNull()
         if (quota == null || quota.total <= 0) {
             Log.d(TAG, "[$platform] 未获取到剩余空间，跳过空间校验")
             return
@@ -86,11 +92,18 @@ object TransferSpaceGuard {
             Log.d(TAG, "[$platform] 批量内容为空或大小为 0，跳过批量空间校验")
             return false
         }
-        val quota = runCatching { quotaProvider() }.getOrNull()
+        val result = runCatching { quotaProvider() }
+        if (result.exceptionOrNull() != null) {
+            // 鉴权过期/网络错误：绝不能冒充「已完成校验」让调用方跳过逐项兜底（P1-3）。
+            // 返回 false → 调用方保留逐项校验，至少不会把「查询失败」误当「空间充足」。
+            val e = result.exceptionOrNull()!!
+            Log.w(TAG, "[$platform] 配额查询失败，保留逐项校验兜底: ${e.message}", e)
+            return false
+        }
+        val quota = result.getOrNull()
         if (quota == null || quota.total <= 0) {
-            // 取配额失败：整批与逐项都无法判定，直接放行并返回 true（省掉循环内 N 次无效查询）
             Log.d(TAG, "[$platform] 未获取到剩余空间，跳过批量空间校验")
-            return true
+            return false
         }
         val free = quota.total - quota.used
         if (required > free) {

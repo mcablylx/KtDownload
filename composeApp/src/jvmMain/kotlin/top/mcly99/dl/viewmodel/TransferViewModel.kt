@@ -333,9 +333,14 @@ class TransferViewModel {
                 val success = sender(task.id) { progress, speed, sent ->
                     uploadSpeeds[task.id] = speed
                     scope.launch {
-                        // 使用引擎给出的真实字节数，而不是按比例换算
-                        updateTask(task.id) {
-                            it.copy(
+                        // 使用引擎给出的真实字节数，而不是按比例换算。
+                        // 取消/完成后可能还有已排队的进度 launch 在执行，绝不能把
+                        // CANCELLED/FAILED/COMPLETED 终态改回 TRANSFERRING（P1-E2）。
+                        updateTask(task.id) { cur ->
+                            if (cur.status == TransferStatus.CANCELLED ||
+                                cur.status == TransferStatus.FAILED ||
+                                cur.status == TransferStatus.COMPLETED
+                            ) cur else cur.copy(
                                 progress = progress,
                                 speed = speed,
                                 transferredSize = sent,
