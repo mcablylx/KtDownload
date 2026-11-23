@@ -136,8 +136,8 @@ class AppViewModel {
     var updateDownloading by mutableStateOf(false)
         private set
 
-    /** 下载进度 0..100。 */
-    var updateProgress by mutableStateOf(0)
+    /** 下载进度 0f..1f（细粒度，负数表示总量未知）。 */
+    var updateProgress by mutableStateOf(0f)
         private set
 
     /** 检查更新的一次性状态（UI 层映射成文案）。 */
@@ -700,11 +700,11 @@ class AppViewModel {
         val info = updateInfo ?: return
         if (updateDownloading) return
         updateDownloading = true
-        updateProgress = 0
+        updateProgress = 0f
         scope.launch {
             try {
                 val file = updateDownloader.download(info.asset, onProgress = { p ->
-                    updateProgress = p.percent
+                    updateProgress = p.fraction
                 })
                 AppLogger.info("Update", "下载完成，准备打开: ${file.fileName}")
                 updateInfo = null

@@ -29,7 +29,7 @@ import top.mcly99.dl.theme.UpdateStrings
  * 与项目里 ConfirmDialog / AddTaskDialog 的模式一致。
  *
  * @param downloading 是否正在下载；为 true 时显示进度条并禁用「立即更新」。
- * @param progress 下载进度 0..100。
+ * @param progress 下载进度 0f..1f；负数表示总量未知（显示不确定进度条）。
  */
 @Composable
 fun UpdateDialog(
@@ -37,7 +37,7 @@ fun UpdateDialog(
     info: UpdateInfo?,
     strings: UpdateStrings,
     downloading: Boolean,
-    progress: Int,
+    progress: Float,
     onUpdate: () -> Unit,
     onLater: () -> Unit,
     onOpenRelease: () -> Unit,
@@ -68,8 +68,8 @@ fun UpdateDialog(
                     Spacer(Modifier.height(12.dp))
                     Text(strings.downloading, style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
                     Spacer(Modifier.height(6.dp))
-                    if (progress >= 0) {
-                        LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.widthIn(max = 380.dp))
+                    if (progress >= 0f) {
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.widthIn(max = 380.dp))
                     } else {
                         LinearProgressIndicator(modifier = Modifier.widthIn(max = 380.dp))
                     }

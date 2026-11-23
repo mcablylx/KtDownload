@@ -24,8 +24,13 @@ class UpdateDownloader(
     private val clientProvider: () -> okhttp3.OkHttpClient = { HttpClients.downloadClient() },
 ) {
 
-    /** 进度回调：progress 0..100，received/total 为字节数（total 未知时为 -1）。 */
-    data class Progress(val percent: Int, val received: Long, val total: Long)
+    /**
+     * 进度回调。
+     * - percent：0..100 的整数百分比（total 未知时为 -1），保留给按百分比显示的调用方
+     * - fraction：0f..1f 的细粒度进度，供进度条使用；total 未知时为 -1f
+     * - received/total：字节数，total 未知时为 -1
+     */
+    data class Progress(val percent: Int, val fraction: Float, val received: Long, val total: Long)
 
     @Volatile
     private var cancelled = false
@@ -54,31 +59,61 @@ class UpdateDownloader(
         val tmp = dir.resolve("${asset.name}.part")
 
         try {
-            val request = Request.Builder().url(asset.downloadUrl).get().build()
-            clientProvider().newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IllegalStateException("下载安装包失败：HTTP ${response.code}")
+            // 与网盘下载、GitHub 仓库浏览共用同一套镜像选择（AUTO 测速 / 用户固定前缀）。
+            // 修复：旧实现直接下载 asset.downloadUrl（github.com 直连），国内常只有几 KB/s，
+            // 277MB 安装包按 1% 粒度回调要几分钟才动一格，看起来像「进度条卡死」。
+            val prefix = GitHubMirror.activePrefix()
+            val candidates = buildList {
+                if (prefix.isNotBlank()) add(prefix + asset.downloadUrl)
+                add(asset.downloadUrl)
+            }
+            val client = clientProvider()
+
+            // 只在「拿到成功响应前」切换下载源；一旦开始写流就固定在当前源，
+            // 避免中途换源导致半截文件重头下载。
+            var activeResponse: okhttp3.Response? = null
+            var usedUrl = ""
+            for (url in candidates) {
+                try {
+                    val request = Request.Builder().url(url).get().build()
+                    val candidate = client.newCall(request).execute()
+                    if (candidate.isSuccessful) {
+                        activeResponse = candidate
+                        usedUrl = url
+                        break
+                    }
+                    AppLogger.warn("Update", "下载源返回 HTTP ${candidate.code}，尝试下一个: ${url.take(100)}")
+                    candidate.close()
+                } catch (e: Exception) {
+                    AppLogger.warn("Update", "下载源连接失败，尝试下一个: ${url.take(100)} (${e.message})")
                 }
-                val body = response.body
-                    ?: throw IllegalStateException("下载安装包失败：空响应体")
+            }
+            val response = activeResponse ?: throw IllegalStateException("所有下载源均不可用，无法下载安装包")
+            AppLogger.info("Update", "安装包下载源: $usedUrl")
+
+            response.use { resp ->
+                val body = resp.body ?: throw IllegalStateException("下载安装包失败：空响应体")
                 val total = if (asset.size > 0) asset.size else body.contentLength()
 
                 body.byteStream().use { input ->
                     Files.newOutputStream(tmp).use { output ->
                         val buffer = ByteArray(64 * 1024)
                         var received = 0L
-                        var lastPercent = -1
+                        var lastReportBytes = -1L
                         while (true) {
                             if (cancelled) throw UpdateCancelled()
                             val n = input.read(buffer)
                             if (n < 0) break
                             output.write(buffer, 0, n)
                             received += n
-                            if (total > 0) {
-                                val percent = (received * 100 / total).toInt().coerceIn(0, 100)
-                                if (percent != lastPercent) {
-                                    lastPercent = percent
-                                    onProgress(Progress(percent, received, total))
+                            // 按字节节流（每 256KB）而非按 1%：低速网络下进度条也能持续可见地推进
+                            if (received - lastReportBytes >= 256L * 1024 || (total > 0 && received >= total)) {
+                                lastReportBytes = received
+                                if (total > 0) {
+                                    val fraction = (received.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                                    onProgress(Progress((fraction * 100).toInt(), fraction, received, total))
+                                } else {
+                                    onProgress(Progress(-1, -1f, received, -1))
                                 }
                             }
                         }
