@@ -13,7 +13,8 @@ package top.mcly99.dl.utils
  * 与下游 `XunleiDriveCredential.fromCookiePairs(Map)` 的语义也一致。
  */
 internal fun deduplicateCookiePairs(pairs: List<Pair<String, String>>): List<Pair<String, String>> {
-    if (pairs.size <= 1) return pairs
+    // 统一返回新集合：size<=1 时也复制，避免调用方改动结果时连带改动入参（P2-E10）
+    if (pairs.size <= 1) return pairs.toList()
     val unique = LinkedHashMap<String, String>(pairs.size)
     pairs.forEach { (name, value) -> unique[name] = value }
     return unique.map { (name, value) -> name to value }
