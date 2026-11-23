@@ -23,6 +23,7 @@ import top.mcly99.dl.utils.AppLogger
 import top.mcly99.dl.utils.deduplicateCookieHeader
 import java.net.URLDecoder
 import java.net.URLEncoder
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * 百度网盘分享解析数据（xpan/share list 响应）。
@@ -143,6 +144,7 @@ class BaiduApi(
     // ---------- 账号 ----------
 
     /** 获取昵称（gettemplatevariable 的 username 字段）；失败返回 null */
+    @Suppress("UNUSED") // 与其它网盘 API 保持对称的账号入口，预留给昵称展示
     suspend fun fetchNickname(cookie: String): String? = withContext(Dispatchers.IO) {
         val result = templateVariable(cookie, """["username"]""") ?: return@withContext null
         result.optString("username").takeIf { it.isNotBlank() }
@@ -174,7 +176,13 @@ class BaiduApi(
         token
     }
 
-    /** 清空 bdstoken 缓存（登出/切换账号时调用，避免旧 token 跨账号复用导致 errno=-6） */
+    /**
+     * 清空 bdstoken 缓存，避免旧 token 跨账号复用导致 errno=-6。
+     *
+     * 当前无需外部调用：缓存按 `cookie.hashCode()` 绑定 owner，换账号后 hashCode 变化
+     * 会自动失效；`refreshBdstoken` 也已强制清缓存。保留为对称 API 备用。
+     */
+    @Suppress("UNUSED")
     fun clearSessionCache() {
         cachedBdstoken = null
         cachedBdstokenOwner = 0
@@ -422,7 +430,7 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
             }
             checkErrno(json, "获取分享文件列表失败")
         }
-        val array = json.optJSONArray("list") ?: org.json.JSONArray()
+        val array = json.optJSONArray("list") ?: JSONArray()
         val files = buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
@@ -890,6 +898,7 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
      * 仍会校验 BDCLND，缺失就回 errno=2。分享页响应头会下发 `Set-Cookie: BDCLND=...`，
      * 这里尽力取一次（取不到返回 null，不影响主流程）。
      */
+    @Suppress("UNUSED") // 分享页 BDCLND 兜底抓取入口，当前主流程用不到，保留备用
     suspend fun shareBdclnd(surl: String, cookie: String): String? = withContext(Dispatchers.IO) {
         val request = Request.Builder()
             .url(BaiduConstants.sharePageUrl(surl))
@@ -1079,7 +1088,10 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
         // 上次成功的形状先试，其余按默认顺序补；形状在外层，签名在内层——
         // 参数形状（尤其 extra.sekey）比签名来源更可能不对，先把每个形状的两个签名试完，
         // 再换下一个形状，命中更早。
-        val order = (listOf(preferredDirectShape) + DIRECT_SHAPES.indices)
+        val order = buildList {
+            add(preferredDirectShape)
+            addAll(DIRECT_SHAPES.indices) // 展开为多个下标；用 addAll 明确意图，避免 `+` 遍历实参的歧义警告
+        }
             .distinct()
             .mapNotNull { DIRECT_SHAPES.getOrNull(it) }
         for (shape in order) {
@@ -1460,8 +1472,8 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
         var errno = json.optInt("errno", 0)
         if (errno == 8888) {
             // 限流：重试 3 次，每次重建 Request 并补头
-            repeat(3) { attempt ->
-                delay(2000)
+            repeat(3) {
+                delay(2.seconds)
                 val rebuilt = Request.Builder()
                     .url(request.url)
                     .headers(request.headers)
