@@ -20,6 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.deduplicateCookieHeader
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -1225,7 +1226,8 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
      * 列出个人网盘目录（修复版）：
      *  - URL 使用 pan.baidu.com（旧 yun.baidu.com 在部分账号下偶发 errno=-6/191）
      *  - 携带 bdstoken + channel=chunlei + showempty=0，对齐官方 web 抓包
-     *  - errno=-6（bdstoken 失效）→ 强制 refreshBdstoken 后重试一次
+     *  - errno=-6（bdstoken 失效 / 脏 Cookie 多份同名值）→ 先 refreshBdstoken 重试一次，
+     *    仍 -6 则按 name 去重 Cookie（保留最后一次）后再兜底重试一次
      *  - 其它非零 errno → 抛 IllegalStateException（不静默吞掉，避免误判为空目录）
      */
     suspend fun listCloudFiles(dir: String, cookie: String): List<ShareFile> = withContext(Dispatchers.IO) {
@@ -1238,6 +1240,18 @@ suspend fun listShare(surl: String, sekey: String, dir: String, cookie: String, 
             val (array2, errno2) = requestListCloudFiles(dir, cookie, fresh)
             array = array2
             errno = errno2
+        }
+        if (errno == -6) {
+            // 存量脏 Cookie 兜底（issue #94）：同一 name 出现多份冲突值（典型是 4 份
+            // STOKEN）会让鉴权恒回 -6，且 gettemplatevariable 同样 -6，上面的刷新重试
+            // 必然失败。按 name 去重（保留最后一次）后再走一遍，避免强迫用户重新登录。
+            val clean = deduplicateCookieHeader(cookie)
+            if (clean != cookie) {
+                val fresh = refreshBdstoken(clean) ?: bdstoken
+                val (array3, errno3) = requestListCloudFiles(dir, clean, fresh)
+                array = array3
+                errno = errno3
+            }
         }
         if (errno != 0) {
             throw IllegalStateException("百度网盘接口错误 (errno=$errno)")

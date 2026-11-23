@@ -7,12 +7,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -78,18 +75,22 @@ fun UpdateDialog(
                 OpenReleaseTextButton(strings.openReleasePage, onOpenRelease)
             }
         },
+        // 与应用内工具栏/设置页按钮统一：主操作实心主色，次操作中性底色，
+        // 均为 36dp 高、6dp 圆角（见 CompactButton）。
         confirmButton = {
-            Button(
+            CompactButton(
+                text = strings.updateNow,
                 onClick = onUpdate,
                 enabled = !downloading,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = FlowDownColors.Primary,
-                    contentColor = FlowDownColors.OnPrimary,
-                ),
-            ) { Text(strings.updateNow) }
+                primary = true,
+            )
         },
         dismissButton = {
-            OutlinedButton(onClick = onLater, enabled = !downloading) { Text(strings.later) }
+            CompactButton(
+                text = strings.later,
+                onClick = onLater,
+                enabled = !downloading,
+            )
         },
         containerColor = FlowDownColors.Card,
         iconContentColor = FlowDownColors.Primary,

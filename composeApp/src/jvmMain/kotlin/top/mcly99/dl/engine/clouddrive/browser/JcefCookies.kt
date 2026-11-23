@@ -13,12 +13,18 @@ import org.cef.misc.BoolRef
 import org.cef.network.CefCookie
 import org.cef.network.CefCookieManager
 import top.mcly99.dl.engine.clouddrive.XunleiDriveCredential
+import top.mcly99.dl.utils.deduplicateCookiePairs
 import java.util.concurrent.ConcurrentLinkedQueue
 
 /** visitAllCookies 的回调在 CEF IO 线程异步执行，返回后要留一小段窗口让回调写完 */
 private const val COOKIE_SETTLE_MS = 400L
 
-/** 读取全局 Cookie 管理器里命中 [domains] 的全部键值对 */
+/**
+ * 读取全局 Cookie 管理器里命中 [domains] 的键值对，并**按 name 去重**（保留最后一次）。
+ *
+ * 不去重会让同一 name（典型是百度 STOKEN，跨 passport/./pan 多个域各存一份不同值）
+ * 被原样拼进同一个 Cookie 头，百度 api/list 直接回 errno=-6（上游 issue #94）。
+ */
 private fun cookiePairs(domains: List<String>): List<Pair<String, String>> {
     val manager = runCatching { CefCookieManager.getGlobalManager() }.getOrNull() ?: return emptyList()
     val pairs = ConcurrentLinkedQueue<Pair<String, String>>()
@@ -34,7 +40,7 @@ private fun cookiePairs(domains: List<String>): List<Pair<String, String>> {
         })
         Thread.sleep(COOKIE_SETTLE_MS)
     }
-    return pairs.toList()
+    return deduplicateCookiePairs(pairs.toList())
 }
 
 /**
