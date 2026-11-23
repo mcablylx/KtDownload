@@ -108,10 +108,13 @@ data class DownloadTask(
         get() = ContentFingerprint.of(etag, lastModified)
 
     // 下载进度（0.0 - 1.0）；HLS 以分片数量为准
+    // 上界钳制：并发分片回写或重试重算时 downloadedSize 可能短暂超过 totalSize，
+    // 不钳制会让进度条 / 百分比越过 100%（P2-E8）
     val progress: Double
         get() = when {
-            type == TaskType.M3u8 && segmentTotal > 0 -> segmentDone.toDouble() / segmentTotal
-            totalSize > 0 -> downloadedSize.toDouble() / totalSize
+            type == TaskType.M3u8 && segmentTotal > 0 ->
+                (segmentDone.toDouble() / segmentTotal).coerceIn(0.0, 1.0)
+            totalSize > 0 -> (downloadedSize.toDouble() / totalSize).coerceIn(0.0, 1.0)
             else -> 0.0
         }
     

@@ -107,6 +107,11 @@ class FfmpegMuxer(
         } catch (e: CancellationException) {
             tmp.delete()
             throw e
+        } catch (e: Exception) {
+            // moveIntoPlace 可能因目标占用/磁盘满抛 IOException（Windows 常见）：
+            // 必须删掉 .tmp 并转成 Failed，不能遗留半成品（P2-5）
+            tmp.delete()
+            return@withContext HlsMuxResult.Failed(result.directory, "合成结果落盘失败: ${e.message}", e)
         }
     }
 

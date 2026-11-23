@@ -74,7 +74,9 @@ class HttpProbe(
     ): ProbedText? {
         val connection = open(url, referer, cookie) ?: return null
         try {
-            connection.requestMethod = "GET"
+            // 请求方法必须在 rawConnection 里、connect 之前设好。cookie 路径会
+            // 在 open() 内手动跟随重定向并读 responseCode，连接此时已建立；
+            // 在这里再 setRequestMethod 会抛 Already connected 被吞成 null（P0-1）。
             val code = connection.responseCode
             if (code !in 200..299) {
                 AppLogger.debug("HttpProbe", "播放列表请求失败: $code $url")
@@ -188,6 +190,9 @@ class HttpProbe(
         return (raw as HttpURLConnection).apply {
             connectTimeout = connectTimeoutMs
             readTimeout = readTimeoutMs
+            // 方法必须在建连前定好：cookie 分支会在 open() 内读 responseCode 建立连接。
+            // 默认 GET；headLength/rangeLength 在 open() 后、未建连前覆盖为 HEAD/GET。
+            requestMethod = "GET"
             instanceFollowRedirects = followRedirects
             useCaches = false
             setSafeHeader("User-Agent", userAgent)

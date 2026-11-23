@@ -1,5 +1,6 @@
 package top.mcly99.dl.engine
 
+import top.mcly99.dl.utils.closeQuietly
 import kotlinx.coroutines.*
 import top.mcly99.dl.model.NetworkDevice
 import top.mcly99.dl.utils.AppConstants
@@ -156,9 +157,9 @@ class TransferEngine(
         serverJob?.cancel()
         discoveryJob = null
         serverJob = null
-        try { discoverySocket?.close() } catch (_: Exception) {}
+        closeQuietly(discoverySocket, "TransferEngine")
         discoverySocket = null
-        try { serverSocket?.close() } catch (_: Exception) {}
+        closeQuietly(serverSocket, "TransferEngine")
         serverSocket = null
     }
     
@@ -201,7 +202,7 @@ class TransferEngine(
                     delay(AppConstants.BROADCAST_INTERVAL_MS)
                 }
             } finally {
-                try { socket.close() } catch (_: Exception) {}
+                closeQuietly(socket, "TransferEngine")
                 discoverySocket = null
                 discoveryRunning = false
             }
@@ -360,7 +361,7 @@ class TransferEngine(
                     launch { handleIncomingFile(clientSocket) }
                 }
             } finally {
-                try { ss.close() } catch (_: Exception) {}
+                closeQuietly(ss, "TransferEngine")
                 serverSocket = null
                 fileServerRunning = false
             }
@@ -429,7 +430,7 @@ class TransferEngine(
         } catch (e: Exception) {
             AppLogger.warn("TransferEngine", "接收文件失败: ${e.message}", e)
         } finally {
-            try { socket.close() } catch (_: Exception) {}
+            closeQuietly(socket, "TransferEngine")
         }
     }
 
@@ -451,22 +452,23 @@ class TransferEngine(
     /** 按声明长度精确读取一个文件；不完整时删除半截文件并抛异常 */
     private fun receivePayload(input: InputStream, outputFile: File, fileSize: Long, buffer: ByteArray) {
         outputFile.parentFile?.mkdirs()
-        val output = BufferedOutputStream(FileOutputStream(outputFile), AppConstants.TRANSFER_BUFFER_SIZE)
         var remaining = fileSize
+        var completed = false
         try {
-            while (remaining > 0) {
-                val n = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
-                if (n == -1) throw EOFException("连接提前关闭，文件不完整")
-                output.write(buffer, 0, n)
-                remaining -= n
+            // use{} 保证正常/异常路径都关流（含 FileOutputStream 构造成功后 write 抛错）
+            BufferedOutputStream(FileOutputStream(outputFile), AppConstants.TRANSFER_BUFFER_SIZE).use { output ->
+                while (remaining > 0) {
+                    val n = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (n == -1) throw EOFException("连接提前关闭，文件不完整")
+                    output.write(buffer, 0, n)
+                    remaining -= n
+                }
+                output.flush()
             }
-            output.flush()
-        } catch (e: Exception) {
-            output.close()
-            outputFile.delete()  // 不留下半截文件
-            throw e
+            completed = true
+        } finally {
+            if (!completed) runCatching { outputFile.delete() } // 不留下半截文件（P2-5）
         }
-        output.close()
     }
 
     /**
@@ -543,7 +545,7 @@ class TransferEngine(
      */
     fun cancelSend(taskId: String) {
         activeSockets.remove(taskId)?.let {
-            try { it.close() } catch (_: Exception) {}
+            closeQuietly(it, "TransferEngine")
         }
     }
 
@@ -681,15 +683,15 @@ class TransferEngine(
 
         } catch (e: java.nio.channels.ClosedByInterruptException) {
             AppLogger.debug("TransferEngine", "传输被中断")
-            try { socket?.close() } catch (_: Exception) {}
+            closeQuietly(socket, "TransferEngine")
             false
         } catch (e: CancellationException) {
             // 协程取消：正常流程，不打印堆栈
-            try { socket?.close() } catch (_: Exception) {}
+            closeQuietly(socket, "TransferEngine")
             throw e
         } catch (e: Exception) {
             AppLogger.warn("TransferEngine", "发送文件失败: ${e.message}", e)
-            try { socket?.close() } catch (_: Exception) {}
+            closeQuietly(socket, "TransferEngine")
             false
         } finally {
             activeSockets.remove(taskId)

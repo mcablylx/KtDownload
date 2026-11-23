@@ -1,5 +1,6 @@
 package top.mcly99.dl.engine.web.browser
 
+import top.mcly99.dl.engine.isHttpToken
 import top.mcly99.dl.engine.sanitizeHttpHeaderValue
 import top.mcly99.dl.engine.web.MediaCandidate
 import top.mcly99.dl.engine.web.MediaKind
@@ -324,6 +325,9 @@ open class BrowserCapture(
         for (item in cookies) {
             val cookie = item.asObject() ?: continue
             val name = cookie.str("name") ?: continue
+            // Cookie 名是外部页面可影响的输入：非法字符没法百分号编码（编了服务端就认不出），
+            // 只能整条丢弃，避免拼出畸形 / 可注入的 Cookie 头（P2-E1）
+            if (!isHttpToken(name)) continue
             val value = cookie.str("value") ?: continue
             val domain = cookie.str("domain")?.trim()?.lowercase()?.trimStart('.') ?: continue
             val builder = byDomain.getOrPut(domain) { StringBuilder() }

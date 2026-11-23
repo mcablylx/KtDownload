@@ -1,5 +1,7 @@
 package top.mcly99.dl.engine
 
+import top.mcly99.dl.utils.ignoreFailure
+import top.mcly99.dl.utils.closeQuietly
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -23,6 +25,7 @@ import top.mcly99.dl.APP_VERSION
 import top.mcly99.dl.engine.hls.FfmpegMuxer
 import top.mcly99.dl.engine.hls.HlsDownloader
 import top.mcly99.dl.engine.hls.HlsMuxResult
+import top.mcly99.dl.engine.web.redactUrl
 import top.mcly99.dl.model.DownloadSource
 import top.mcly99.dl.model.DownloadStatus
 import top.mcly99.dl.model.DownloadTask
@@ -270,40 +273,42 @@ class DownloadEngine(
         val resolvedPath = resolveTaskPath(savePath, fileName, defaultDownloadPath)
         val path = if (type == TaskType.M3u8) ensureHlsOutputPath(resolvedPath) else resolvedPath
 
-        // HLS 的 `{name}.hls` 目录也是任务产物：残留目录或已排队任务占用同名路径时同样递增序号，
-        // 否则不同视频的分片会被 `.done` 标记混拼（v3-P1-2）
-        val finalPath = handleDuplicateFile(path) { candidate ->
-            (type == TaskType.M3u8 && hlsSegmentDir(candidate.toFile()).exists()) ||
-                synchronized(stateLock) { taskMap.values.any { it.savePath == candidate } }
+        // 选名与入表必须在同一临界区：否则两个线程并发添加同名文件时，
+        // 都会在对方入表前看到「路径空闲」，最终写同一个目标文件（P2-E2）
+        val task = synchronized(stateLock) {
+            // HLS 的 `{name}.hls` 目录也是任务产物：残留目录或已排队任务占用同名路径时同样递增序号，
+            // 否则不同视频的分片会被 `.done` 标记混拼（v3-P1-2）
+            val finalPath = handleDuplicateFile(path) { candidate ->
+                (type == TaskType.M3u8 && hlsSegmentDir(candidate.toFile()).exists()) ||
+                    taskMap.values.any { it.savePath == candidate }
+            }
+            DownloadTask(
+                id = id,
+                url = trimmedUrl,
+                fileName = finalPath.fileName.toString(),
+                savePath = finalPath,
+                status = DownloadStatus.QUEUED,
+                threads = threads.coerceIn(1, AppConstants.MAX_THREADS),
+                type = type,
+                totalSize = totalSize.coerceAtLeast(0L),
+                referer = referer?.takeIf { it.isNotBlank() },
+                cookie = cookie?.takeIf { it.isNotBlank() },
+                userAgent = userAgent?.takeIf { it.isNotBlank() },
+                origin = origin?.takeIf { it.isNotBlank() },
+                secChUa = secChUa?.takeIf { it.isNotBlank() },
+                requiresCookie = !cookie.isNullOrBlank(),
+                // 去掉空地址 / 与主源重复的条目；按 URL 去重，避免同一账号被取链两次时
+                // 分片轮转退化成「一半分片都打同一个源」。
+                altSources = altSources
+                    .filter { it.url.isNotBlank() && it.url != trimmedUrl }
+                    .distinctBy { it.url },
+            ).also {
+                taskMap[id] = it
+                publishLocked(force = true)
+            }
         }
-        finalPath.parent?.toFile()?.mkdirs()
+        task.savePath.parent?.toFile()?.mkdirs()
 
-        val task = DownloadTask(
-            id = id,
-            url = trimmedUrl,
-            fileName = finalPath.fileName.toString(),
-            savePath = finalPath,
-            status = DownloadStatus.QUEUED,
-            threads = threads.coerceIn(1, AppConstants.MAX_THREADS),
-            type = type,
-            totalSize = totalSize.coerceAtLeast(0L),
-            referer = referer?.takeIf { it.isNotBlank() },
-            cookie = cookie?.takeIf { it.isNotBlank() },
-            userAgent = userAgent?.takeIf { it.isNotBlank() },
-            origin = origin?.takeIf { it.isNotBlank() },
-            secChUa = secChUa?.takeIf { it.isNotBlank() },
-            requiresCookie = !cookie.isNullOrBlank(),
-            // 去掉空地址 / 与主源重复的条目；按 URL 去重，避免同一账号被取链两次时
-            // 分片轮转退化成「一半分片都打同一个源」。
-            altSources = altSources
-                .filter { it.url.isNotBlank() && it.url != trimmedUrl }
-                .distinctBy { it.url },
-        )
-
-        synchronized(stateLock) {
-            taskMap[id] = task
-            publishLocked(force = true)
-        }
         requestPersist()
         AppLogger.debug("DownloadEngine", "任务入队: ${task.fileName}")
 
@@ -550,13 +555,13 @@ class DownloadEngine(
             .filter { it.key == taskId || it.key.startsWith("$taskId#") }
             .forEach { (key, connection) ->
                 taskConnections.remove(key)
-                try { connection.disconnect() } catch (_: Exception) {}
+                ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
             }
         taskFiles.remove(taskId)?.forEach {
-            try { it.close() } catch (_: Exception) {}
+            closeQuietly(it, "DownloadEngine")
         }
         taskProcesses.remove(taskId)?.let { process ->
-            try { process.destroyForcibly() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "结束进程") { process.destroyForcibly() }
         }
         val job = activeJobs.remove(taskId)
         job?.cancel()
@@ -636,7 +641,7 @@ class DownloadEngine(
             )
         } finally {
             taskConnections.remove(taskId)
-            taskFiles.remove(taskId)?.forEach { try { it.close() } catch (_: Exception) {} }
+            taskFiles.remove(taskId)?.forEach { closeQuietly(it, "DownloadEngine") }
             // 只有真正结束时才移出 activeJobs 并补位；暂停/取消已在外部移除
             if (selfJob != null && activeJobs[taskId] == selfJob) {
                 activeJobs.remove(taskId)
@@ -1059,7 +1064,7 @@ class DownloadEngine(
             AppLogger.debug("DownloadEngine", "HEAD 探测失败: ${e.message}")
             null
         } finally {
-            try { connection?.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection?.disconnect() }
         }
     }
 
@@ -1086,8 +1091,8 @@ class DownloadEngine(
             AppLogger.debug("DownloadEngine", "Range 探测失败: ${e.message}")
             null
         } finally {
-            try { connection?.inputStream?.close() } catch (_: Exception) {}
-            try { connection?.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "关闭输入流") { connection?.inputStream?.close() }
+            ignoreFailure("DownloadEngine", "断开连接") { connection?.disconnect() }
         }
     }
 
@@ -1162,8 +1167,8 @@ class DownloadEngine(
         } catch (e: Exception) {
             false
         } finally {
-            try { connection?.disconnect() } catch (_: Exception) {}
-            try { connection?.inputStream?.close() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection?.disconnect() }
+            ignoreFailure("DownloadEngine", "关闭输入流") { connection?.inputStream?.close() }
         }
     }
 
@@ -1193,24 +1198,22 @@ class DownloadEngine(
             else -> 0L
         }
         val totalSize = task.totalSize
+        val sources = task.downloadSources()
 
-        var connection = newConnection(
-            task.url,
-            task.auth(),
-            range = if (startByte > 0) "bytes=$startByte-" else null,
-            ifRange = if (startByte > 0) task.fingerprint.ifRangeValue else null,
-        )
-        taskConnections[taskId] = connection
-        connection.connect()
-
-        var code = connection.responseCode
+        // 单线程路径同样轮转多源（P2-E3）：旧实现只认 task.url，多账号场景下主链接
+        // 过期（403/410）就整任务失败，而分片路径早已换源重试。这里只在「还没写任何字节」
+        // 的阶段换源，落盘之后仍固定在当前源，避免半截文件拼错。
+        val opened = openSingleSource(taskId, sources, startByte, task.fingerprint.ifRangeValue)
+        var source = opened.third
+        var connection = opened.first
+        var code = opened.second
 
         /** 放弃续传：断开当前连接，从 0 重开一条不带 Range 的 */
         fun restartFromZero(reason: String) {
             AppLogger.info("DownloadEngine", "$reason，从头重下: ${task.fileName}")
-            try { connection.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
             startByte = 0L
-            connection = newConnection(task.url, task.auth())
+            connection = newConnection(source.first, source.second)
             taskConnections[taskId] = connection
             connection.connect()
             code = connection.responseCode
@@ -1219,7 +1222,7 @@ class DownloadEngine(
         if (code == HTTP_RANGE_NOT_SATISFIABLE) {
             // 416：本地文件已达/超过远端长度。恰好相等说明上次已下完但状态没来得及落库。
             if (totalSize > 0 && startByte == totalSize) {
-                try { connection.disconnect() } catch (_: Exception) {}
+                ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
                 taskConnections.remove(taskId)
                 return@withContext
             }
@@ -1245,7 +1248,7 @@ class DownloadEngine(
             )
             startByte = 0L
         } else if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-            try { connection.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
             taskConnections.remove(taskId)
             throw IllegalStateException("HTTP $code")
         }
@@ -1318,11 +1321,65 @@ class DownloadEngine(
             }
             emitProgress(taskId, tracker.totalDone(), 0L)
         } finally {
-            try { channel.close() } catch (_: Exception) {}
+            closeQuietly(channel, "DownloadEngine")
             taskFiles[taskId]?.remove(channel)
             taskConnections.remove(taskId)
-            try { connection.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
         }
+    }
+
+    /**
+     * 单线程路径的建连 + 状态判定，失败时按 [sources] 顺序换源（P2-E3）。
+     *
+     * 只有「连接异常」与「不可用的 HTTP 状态」会换源；416 属于合法响应（本地偏移已到位），
+     * 交给调用方判断。全部源都不可用时抛最后一次的错误，错误文案与旧实现一致（`HTTP 403`）。
+     *
+     * @return `(connection, responseCode, 实际生效的源)`
+     */
+    private fun openSingleSource(
+        taskId: String,
+        sources: List<Pair<String, RequestAuth>>,
+        startByte: Long,
+        ifRange: String?,
+    ): Triple<HttpURLConnection, Int, Pair<String, RequestAuth>> {
+        var lastError: Exception? = null
+        sources.forEachIndexed { index, source ->
+            val conn = newConnection(
+                source.first,
+                source.second,
+                range = if (startByte > 0) "bytes=$startByte-" else null,
+                ifRange = if (startByte > 0) ifRange else null,
+            )
+            taskConnections[taskId] = conn
+            try {
+                conn.connect()
+                val code = conn.responseCode
+                if (code == HttpURLConnection.HTTP_OK ||
+                    code == HttpURLConnection.HTTP_PARTIAL ||
+                    code == HTTP_RANGE_NOT_SATISFIABLE
+                ) {
+                    return Triple(conn, code, source)
+                }
+                lastError = IllegalStateException("HTTP $code")
+                if (index < sources.lastIndex) {
+                    AppLogger.warn(
+                        "DownloadEngine",
+                        "源返回 HTTP $code，换下一个源: ${redactUrl(source.first)}",
+                    )
+                }
+            } catch (e: Exception) {
+                lastError = e
+                if (index < sources.lastIndex) {
+                    AppLogger.warn(
+                        "DownloadEngine",
+                        "源连接失败，换下一个源: ${redactUrl(source.first)}（${e.message}）",
+                    )
+                }
+            }
+            ignoreFailure("DownloadEngine", "断开连接") { conn.disconnect() }
+            taskConnections.remove(taskId)
+        }
+        throw lastError ?: IllegalStateException("没有可用的下载源")
     }
 
     /**
@@ -1486,6 +1543,10 @@ class DownloadEngine(
         // 之后再 setRequestProperty 会抛 "Already connected"（分块下载全灭）
         val connection = newConnection(url, auth, range = "bytes=$connStart-$rangeEnd", ifRange = chunkIfRange)
         taskConnections["$taskId#$index"] = connection
+        // P2-3：connect()/responseCode()/FileChannel.open() 都可能抛异常，必须和后面的
+        // 读写共用同一个 try/finally，否则这些早期失败会泄漏连接与 taskConnections 映射项。
+        var channel: FileChannel? = null
+        try {
         connection.connect()
         val code = connection.responseCode
         if (code == HttpURLConnection.HTTP_OK) {
@@ -1528,22 +1589,22 @@ class DownloadEngine(
             }
         }
 
-        val channel = FileChannel.open(
+        channel = FileChannel.open(
             part.toPath(),
             StandardOpenOption.CREATE,
             StandardOpenOption.WRITE,
         )
         taskFiles.computeIfAbsent(taskId) { CopyOnWriteArrayList() }.add(channel)
-        channel.truncate(offset)
-        channel.position(offset)
+        val ch = channel // 非 null 局部引用，供读写使用（channel 变量本身因 finally 需要而声明为可空）
+        ch.truncate(offset)
+        ch.position(offset)
         tracker.update(index, offset)
 
         var written = offset
         var lastFlush = 0L
         var lastEmit = 0L
         val selfJob = currentCoroutineContext()[Job]
-        try {
-            limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
+        limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
                 val buffer = ByteBuffer.allocate(AppConstants.CHUNK_BUFFER_SIZE)
                 val array = buffer.array()
                 while (true) {
@@ -1555,7 +1616,7 @@ class DownloadEngine(
                     }
                     buffer.clear()
                     buffer.limit(n)
-                    while (buffer.hasRemaining()) channel.write(buffer)
+                    while (buffer.hasRemaining()) ch.write(buffer)
                     written += n
                     tracker.update(index, written)
                     val now = System.currentTimeMillis()
@@ -1591,10 +1652,13 @@ class DownloadEngine(
             tracker.discard(index)
             throw e
         } finally {
-            try { channel.close() } catch (_: Exception) {}
-            taskFiles[taskId]?.remove(channel)
+            // channel 可能为 null：FileChannel.open 本身抛异常时也要能走到这里清理
+            channel?.let { c ->
+                closeQuietly(c, "DownloadEngine")
+                taskFiles[taskId]?.remove(c)
+            }
             taskConnections.remove("$taskId#$index")
-            try { connection.disconnect() } catch (_: Exception) {}
+            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
         }
     }
 
@@ -1800,11 +1864,11 @@ class DownloadEngine(
         activeJobs.values.forEach { it.cancel() }
         activeJobs.clear()
         stoppingJobs.clear()
-        taskConnections.values.forEach { try { it.disconnect() } catch (_: Exception) {} }
+        taskConnections.values.forEach { ignoreFailure("DownloadEngine", "断开连接") { it.disconnect() } }
         taskConnections.clear()
-        taskProcesses.values.forEach { try { it.destroyForcibly() } catch (_: Exception) {} }
+        taskProcesses.values.forEach { ignoreFailure("DownloadEngine", "结束进程") { it.destroyForcibly() } }
         taskProcesses.clear()
-        taskFiles.values.flatten().forEach { try { it.close() } catch (_: Exception) {} }
+        taskFiles.values.flatten().forEach { closeQuietly(it, "DownloadEngine") }
         taskFiles.clear()
         // 退出前把任务写盘（节流协程即将被取消，这里同步落盘）
         persistJob?.cancel()

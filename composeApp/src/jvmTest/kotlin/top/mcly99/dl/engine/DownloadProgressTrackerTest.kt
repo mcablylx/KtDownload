@@ -65,4 +65,18 @@ class DownloadProgressTrackerTest {
 
         assertEquals(600, tracker.totalDone())
     }
+
+    /** 多源 failover：discard 后换源重试的 update 必须重新计入（P2-4） */
+    @Test
+    fun update_after_discard_reactivates_chunk() {
+        val tracker = DownloadProgressTracker(totalSize = 0, chunkCount = 2)
+        tracker.update(0, 100)
+        tracker.update(1, 200)
+        tracker.discard(0)
+        assertEquals(200, tracker.totalDone())
+
+        // 换源重试从偏移 100 继续下载到 300：必须重新计入，不能永久跳过
+        tracker.update(0, 300)
+        assertEquals(500, tracker.totalDone())
+    }
 }

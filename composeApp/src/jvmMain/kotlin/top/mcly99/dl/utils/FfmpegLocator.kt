@@ -54,18 +54,25 @@ object FfmpegLocator {
         if (probed && System.currentTimeMillis() - probedAtMs < NEGATIVE_CACHE_TTL_MS) {
             return null
         }
-        val found = searchCandidates()
-        cachedPath = found
-        if (found != null) {
-            cachedVersion = probeVersion(found)
-            // 探测到版本才算真正可用
-            if (cachedVersion == null) {
-                cachedPath = null
+        // 双检：并发首次调用（转封装线程 + 设置页探测）只走一次查找与起进程
+        synchronized(this) {
+            cachedPath?.let { return it }
+            if (probed && System.currentTimeMillis() - probedAtMs < NEGATIVE_CACHE_TTL_MS) {
+                return null
             }
+            val found = searchCandidates()
+            cachedPath = found
+            if (found != null) {
+                cachedVersion = probeVersion(found)
+                // 探测到版本才算真正可用
+                if (cachedVersion == null) {
+                    cachedPath = null
+                }
+            }
+            probed = true
+            probedAtMs = System.currentTimeMillis()
+            return cachedPath
         }
-        probed = true
-        probedAtMs = System.currentTimeMillis()
-        return cachedPath
     }
 
     /**

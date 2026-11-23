@@ -1,5 +1,7 @@
 package top.mcly99.dl.engine
 
+import top.mcly99.dl.utils.ignoreFailure
+import top.mcly99.dl.utils.closeQuietly
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import top.mcly99.dl.theme.UiStrings
@@ -188,8 +190,8 @@ class WebUploadServer(
             true
         } catch (e: Exception) {
             AppLogger.warn("WebUpload", "启动失败，端口 $listenPort: ${e.message}", e)
-            try { created?.stop(0) } catch (_: Exception) {}
-            try { pool?.shutdownNow() } catch (_: Exception) {}
+            ignoreFailure("WebUploadServer", "停止内嵌服务器") { created?.stop(0) }
+            ignoreFailure("WebUploadServer", "关闭线程池") { pool?.shutdownNow() }
             // 旧服务保持原样：这里不动 server / executor / port
             false
         }
@@ -228,7 +230,7 @@ class WebUploadServer(
         }.isSuccess
         if (!started) {
             AppLogger.warn("WebUpload", "空闲超时看门狗启动失败，长连接可能占住上传线程")
-            try { scheduler.shutdownNow() } catch (_: Exception) {}
+            ignoreFailure("WebUploadServer", "关闭调度器") { scheduler.shutdownNow() }
             return
         }
         watchdog = scheduler
@@ -236,9 +238,9 @@ class WebUploadServer(
 
     /** 关闭一个具体的服务实例与其线程池；不影响 [server] 字段，供端口切换时定点回收 */
     private fun shutdown(target: HttpServer?, pool: ExecutorService?) {
-        try { target?.stop(0) } catch (_: Exception) {}
+        ignoreFailure("WebUploadServer", "停止内嵌服务器") { target?.stop(0) }
         // 关键：释放线程池，否则反复改端口会累积线程
-        try { pool?.shutdownNow() } catch (_: Exception) {}
+        ignoreFailure("WebUploadServer", "关闭线程池") { pool?.shutdownNow() }
         try { pool?.awaitTermination(2, TimeUnit.SECONDS) } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
@@ -386,7 +388,7 @@ class WebUploadServer(
             activeUploads.remove(session)
             uploadSlots.release()
             // 尽力读完/关闭请求体，避免连接复用异常
-            try { exchange.requestBody.close() } catch (_: Exception) {}
+            closeQuietly(exchange.requestBody, "WebUploadServer")
         }
     }
 

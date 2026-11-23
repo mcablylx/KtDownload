@@ -129,7 +129,8 @@ class HlsDownloader(
         }
 
         val audioMedia = loaded.audio?.let { rendition ->
-            val fetched = fetchText(rendition.uri!!, tracker)
+            val audioUri = rendition.uri ?: throw HlsException("音轨列表缺少 URI")
+            val fetched = fetchText(audioUri, tracker)
             M3u8Parser.parse(fetched.text, fetched.url, loaded.sessionKey) as? HlsPlaylist.Media
                 ?: throw HlsException("音轨列表指向的仍是主列表，暂不支持多级嵌套")
         }

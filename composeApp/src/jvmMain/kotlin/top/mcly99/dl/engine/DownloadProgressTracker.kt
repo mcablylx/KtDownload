@@ -49,6 +49,11 @@ class DownloadProgressTracker(val totalSize: Long, val chunkCount: Int) {
             downloadedInChunk.coerceAtLeast(0L)
         }
         chunks.set(index, value)
+        // 多源 failover：失败分块先被 discard() 置 inactive，换源重试时会再次 update；
+        // 此时必须恢复 active，否则该块字节被 totalDone() 永久跳过，进度/速度偏小（P2-4）。
+        synchronized(activeLock) {
+            if (index < active.size && !active[index]) active[index] = true
+        }
         return totalDone()
     }
 

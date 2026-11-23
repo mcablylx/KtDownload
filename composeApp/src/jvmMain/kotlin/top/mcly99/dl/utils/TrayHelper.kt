@@ -83,9 +83,11 @@ object TrayHelper {
             "composeResources/ktdownload.composeapp.generated.resources/drawable/img_logo.png",
         )
         for (path in legacyPaths) {
-            val stream = javaClass.classLoader.getResourceAsStream(path) ?: continue
-            runCatching { ImageIO.read(stream) }.getOrNull()
-                ?.let { return it.getScaledInstance(side, side, Image.SCALE_SMOOTH) }
+            // use{} 确保 ImageIO 读完即关流（ImageIO.read 不代为关闭）；启动阶段最多 2 个流（P2-5）
+            javaClass.classLoader.getResourceAsStream(path)?.use { stream ->
+                runCatching { ImageIO.read(stream) }.getOrNull()
+                    ?.let { return it.getScaledInstance(side, side, Image.SCALE_SMOOTH) }
+            }
         }
 
         return fallbackImage(side)

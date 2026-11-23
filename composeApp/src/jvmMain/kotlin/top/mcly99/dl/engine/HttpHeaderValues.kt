@@ -41,6 +41,20 @@ internal fun sanitizeHttpHeaderValue(value: String): String {
 
 private val HEX = "0123456789ABCDEF"
 
+/** RFC 7230 token 允许的字符：可见 ASCII 去掉分隔符 */
+private const val TOKEN_SEPARATORS = "()<>@,;:\\\"/[]?={} \t"
+
+/**
+ * 判断字符串是否是合法的 HTTP token（可用于请求头名 / Cookie 名）。
+ *
+ * Cookie **名**不能像值那样百分号编码——编码后服务端就认不出这个 Cookie 了，
+ * 所以外部页面注入的非法名字只能整条丢弃（P2-E1）。
+ */
+internal fun isHttpToken(text: String): Boolean {
+    if (text.isEmpty()) return false
+    return text.all { it.code in 0x21..0x7E && it !in TOKEN_SEPARATORS }
+}
+
 /**
  * 登录凭证入站清洗：`k=v; k=v` 这种 Cookie 串可以放心编码，但迅雷的结构化凭证是
  * JSON（里面可能有换行 / 引号 / 非 ASCII 字段），一旦整串百分号编码就再也没法解析了。

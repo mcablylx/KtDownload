@@ -51,17 +51,21 @@ object VlcLocator {
         // 只缓存成功：用户可能刚装完 VLC 或把 libvlc 解压到 resources/，
         // 下次点播放要能重新搜到，而不是被一次失败永久钉死。
         cached?.let { return it }
-        // 钩子返回 null 也要算「没找到」：不能用 `?.invoke() ?: search()`，
-        // 那样会把测试里的「这次找不到」回退成真实查找
-        val hook = finder
-        val found = if (hook != null) hook() else search()
-        if (found == null) {
-            AppLogger.info("VlcLocator", "未找到 libvlc（$coreLibraryName），在线观看不可用")
-            return null
+        // 双检：并发首次定位只搜一轮文件系统，避免重复遍历目录
+        synchronized(this) {
+            cached?.let { return it }
+            // 钩子返回 null 也要算「没找到」：不能用 `?.invoke() ?: search()`，
+            // 那样会把测试里的「这次找不到」回退成真实查找
+            val hook = finder
+            val found = if (hook != null) hook() else search()
+            if (found == null) {
+                AppLogger.info("VlcLocator", "未找到 libvlc（$coreLibraryName），在线观看不可用")
+                return null
+            }
+            cached = found
+            AppLogger.info("VlcLocator", "libvlc 目录: $found")
+            return found
         }
-        cached = found
-        AppLogger.info("VlcLocator", "libvlc 目录: $found")
-        return found
     }
 
     fun isAvailable(): Boolean = locate() != null

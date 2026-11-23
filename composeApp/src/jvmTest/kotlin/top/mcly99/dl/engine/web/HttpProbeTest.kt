@@ -25,11 +25,14 @@ class HttpProbeTest {
     private lateinit var executor: ExecutorService
     private lateinit var baseUrl: String
     private val lastReferer = AtomicReference<String?>(null)
+    private val lastCookie = AtomicReference<String?>(null)
+    private val crossTargetCookie = AtomicReference<String?>(null)
 
     @BeforeTest
     fun setUp() {
         executor = Executors.newFixedThreadPool(4)
-        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        // 通配绑定：127.0.0.2 也指向本机，用它模拟「跨域」但不依赖真实外网
+        server = HttpServer.create(InetSocketAddress(0), 0)
         server.executor = executor
 
         server.createContext("/playlist.m3u8") { exchange ->
@@ -37,6 +40,29 @@ class HttpProbeTest {
             val body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nv.m3u8\n"
                 .toByteArray(StandardCharsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/vnd.apple.mpegurl")
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+
+        // 带 Cookie 的探测：服务器回显是否收到 Cookie，用于验证会话能带上、且不破坏请求方法设置
+        server.createContext("/cookie-playlist.m3u8") { exchange ->
+            lastCookie.set(exchange.requestHeaders.getFirst("Cookie"))
+            val body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\ncookie-v.m3u8\n"
+                .toByteArray(StandardCharsets.UTF_8)
+            exchange.responseHeaders.add("Content-Type", "application/vnd.apple.mpegurl")
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+
+        // 跨域重定向（127.0.0.1 → 127.0.0.2）：目标端点记录是否收到 Cookie
+        server.createContext("/cross-redirect.m3u8") { exchange ->
+            exchange.responseHeaders.add("Location", "http://127.0.0.2:${server.address.port}/cross-target.m3u8")
+            exchange.sendResponseHeaders(302, -1)
+            exchange.close()
+        }
+        server.createContext("/cross-target.m3u8") { exchange ->
+            crossTargetCookie.set(exchange.requestHeaders.getFirst("Cookie"))
+            val body = "#EXTM3U\ncross-v.m3u8\n".toByteArray(StandardCharsets.UTF_8)
             exchange.sendResponseHeaders(200, body.size.toLong())
             exchange.responseBody.use { it.write(body) }
         }
@@ -121,6 +147,22 @@ class HttpProbeTest {
 
         // 主播放列表本身也常校验 Referer，漏了这条清晰度探测就永远拿不到档位
         assertEquals("https://page.example.com/watch/1", lastReferer.get())
+    }
+
+    @Test
+    fun fetch_text_with_cookie_succeeds() {
+        // 回归 P0-1：cookie 路径下 followRedirectsKeepingCookie 已建立连接，
+        // 若 fetchTextWithUrl 再设 requestMethod 会抛 Already connected 被吞成 null
+        val text = HttpProbe().fetchText("$baseUrl/cookie-playlist.m3u8", cookie = "STOKEN=abc")
+        assertTrue(text!!.startsWith("#EXTM3U"), "带 Cookie 的探测必须成功返回播放列表")
+        assertEquals("STOKEN=abc", lastCookie.get())
+    }
+
+    @Test
+    fun cookie_not_leaked_on_cross_host_redirect() {
+        val text = HttpProbe().fetchText("$baseUrl/cross-redirect.m3u8", cookie = "STOKEN=secret")
+        assertTrue(text!!.startsWith("#EXTM3U"))
+        assertNull(crossTargetCookie.get(), "会话 Cookie 不得随跨域重定向发送到第三方主机")
     }
 
     @Test
