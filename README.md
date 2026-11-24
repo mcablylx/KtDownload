@@ -1,6 +1,6 @@
 # KtDownload 使用与开发说明
 
-> 当前版本：**1.0.0**  
+> 当前版本：**1.0.2**  
 > 工程名称：`KtDownload`  
 > 应用名称：KtDownload  
 > 开源协议：**GNU Affero General Public License v3.0（AGPL-3.0）**  
@@ -103,7 +103,7 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 - 每条结果记住来源页面地址，下载时作为 `Referer` 贯穿探测、分块与 HLS 分片请求。
 - 可选“探测文件大小”：按 4 并发 HEAD / Range 获取体积；可选“深度抓取”：用本机 Chrome / Edge 经 CDP 监听真实网络请求，拿到运行时签名地址与当次会话 Cookie。
 - 深度抓取的会话 Cookie 不写磁盘；任务重启后提示重新抓取，而不是发起注定失败的请求。
-- 身份头按来源区分：抓网页任务使用浏览器 UA，手动添加任务自报 `KtDownload/1.0.0`；跳转不同 host 时不携带 Cookie。
+- 身份头按来源区分：抓网页任务使用浏览器 UA，手动添加任务自报 `KtDownload/1.0.2`；跳转不同 host 时不携带 Cookie。
 
 ### 在线观看
 
