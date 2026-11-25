@@ -425,7 +425,16 @@ private object XunleiAdapter : MyDrivePlatformAdapter {
     private val api = XunleiApi()
     override val platform = SharePlatform.XUNLEI
     override val capabilities: MyDriveCapabilities = fullCapabilities()
-    override val rootDirId: String = "0"
+
+    /**
+     * 迅雷个人网盘的根是**空串**，不是 `"0"`：`GET /drive/v1/files?parent_id=` 才表示根目录，
+     * 传 `"0"` 会被服务端当成一个不存在的文件夹，直接回「文件(夹)不存在」。
+     *
+     * 注意别和**分享链路**的根哨兵混为一谈：[CloudDriveService.rootDirFid] 给迅雷返回 `"0"`，
+     * 那是 `getShare` / `getShareDetail` 里「顶层分享页」的判定值（见 XunleiResolveRepository），
+     * 两套语义不同。
+     */
+    override val rootDirId: String = ""
 
     private fun creds(ctx: DriveContext): Triple<String, String, String> {
         val c = XunleiDriveCredential.parse(ctx.credential)?.takeIf { it.isUsable }

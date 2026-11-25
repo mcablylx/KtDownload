@@ -64,6 +64,9 @@ class MyDriveApiTest {
         assertEquals("0", api.rootDirId(SharePlatform.PAN115))
         assertEquals("", api.rootDirId(SharePlatform.GUANGYA))
         assertEquals("", api.rootDirId(SharePlatform.GITHUB))
+        // 迅雷个人网盘的根是空串（parent_id= 表示根）；写 "0" 会被服务端当成不存在的文件夹，
+        // 列表直接回「文件(夹)不存在」
+        assertEquals("", api.rootDirId(SharePlatform.XUNLEI))
     }
 
     @Test
