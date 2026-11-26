@@ -71,7 +71,7 @@ class DownloadEngine(
     private val taskPersistenceEnabled: Boolean = true,
     /** 多线程阈值可注入；生产使用 [AppConstants.MULTI_THREAD_THRESHOLD_BYTES] */
     private val multiThreadThresholdBytes: Long = AppConstants.MULTI_THREAD_THRESHOLD_BYTES,
-) {
+) : DownloadOperations {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** 任务表：写操作统一由 [stateLock] 保护 */
@@ -79,7 +79,7 @@ class DownloadEngine(
     private val stateLock = Any()
 
     private val _taskState = MutableStateFlow<List<DownloadTask>>(emptyList())
-    val taskState: StateFlow<List<DownloadTask>> = _taskState.asStateFlow()
+    override val taskState: StateFlow<List<DownloadTask>> = _taskState.asStateFlow()
 
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
@@ -124,22 +124,22 @@ class DownloadEngine(
 
     // 最大并发下载数（同时下载的文件数）；UI 线程写入，调度线程读取
     @Volatile
-    var maxConcurrentDownloads = 3
+    override var maxConcurrentDownloads = 3
 
     // 单文件下载线程数（多线程加速）；UI 线程写入，工作线程读取
     // 默认值与 AppSettings.defaultThreads 保持一致（v4-P2-5：原先 4 / 8 两处不一致）
     @Volatile
-    var downloadThreadsPerFile = 8
+    override var downloadThreadsPerFile = 8
 
     // 默认下载目录
-    var defaultDownloadPath: Path = initializeDefaultDownloadPath()
+    override var defaultDownloadPath: Path = initializeDefaultDownloadPath()
 
     /**
      * 全局下载限速（字节/秒）；0 表示不限速。
      * 所有任务的分块线程共享同一个令牌桶，因此限制的是「总带宽」而非单线程。
      */
     @Volatile
-    var speedLimit: Long = 0L
+    override var speedLimit: Long = 0L
         set(value) {
             field = value.coerceAtLeast(0L)
             rateLimiter.bytesPerSecond = field
@@ -155,14 +155,14 @@ class DownloadEngine(
      * 手动代理模式也能在设置页改完立刻生效。
      */
     @Volatile
-    var proxyProvider: () -> java.net.Proxy? = { null }
+    override var proxyProvider: () -> java.net.Proxy? = { null }
 
     /** 当前是否有代理生效（供 UI / 诊断读取） */
-    val proxyEnabled: Boolean get() = currentProxy() != null
+    override val proxyEnabled: Boolean get() = currentProxy() != null
 
     /** HLS 合成成功后是否保留 `*.hls` 分片目录 */
     @Volatile
-    var keepHlsSegments: Boolean = false
+    override var keepHlsSegments: Boolean = false
 
     /** 探测逻辑抛异常时按直连处理，不能让一个分片因为代理配置问题整条任务失败 */
     private fun currentProxy(): java.net.Proxy? = runCatching { proxyProvider() }.getOrNull()
@@ -193,7 +193,7 @@ class DownloadEngine(
      * 这里不自动调用 dispatch：是否自动开始由用户的 `autoStart` 设置决定，
      * 由 [top.mcly99.dl.viewmodel.DownloadViewModel.startAll] 触发。
      */
-    fun restoreTasks() {
+    override fun restoreTasks() {
         if (!taskPersistenceEnabled) return
         val restored = TaskStore.load()
         if (restored.isEmpty()) return
@@ -230,32 +230,29 @@ class DownloadEngine(
     // ------------------------------------------------------------------ 任务管理
 
     /**
-     * 添加下载任务
+     * 添加下载任务。
+     *
+     * 参数默认值由 [DownloadOperations] 声明（override 处不能再写一遍），含义也写在那里：
+     * - `referer` 防盗链页面地址，跨域 CDN 缺了就是 403；
+     * - `cookie` 深度抓取带回来的会话，带签名的地址缺了会「浏览器能播、这里下不动」；
+     * - `userAgent` 覆盖默认 UA，网盘 CDN 对平台串有硬要求（115 / 迅雷 / 百度）；
+     * - `origin` / `secChUa` 对应 UC、蓝奏优享的跨域校验与游客链路；
+     * - `totalSize` 调用方已知的文件大小，0 表示交给引擎探测（夸克类 CDN 的 HEAD 常被 403）；
+     * - `altSources` C2 备选直链，空列表 = 老的单源行为。
      *
      * @throws IllegalArgumentException 链接为空、BT 或协议不受支持
      */
-    fun addTask(
+    override fun addTask(
         url: String,
-        savePath: Path? = null,
-        threads: Int = downloadThreadsPerFile,
-        /** 防盗链 Referer：抓网页传页面地址；手动添加任务时为 null */
-        referer: String? = null,
-        /** 会话 Cookie：深度抓取带回来的那一份；为 null 时不设这个头 */
-        cookie: String? = null,
-        /** 覆盖默认 UA：网盘用平台专用串（115 客户端 / 迅雷 app / 百度 netdisk） */
-        userAgent: String? = null,
-        /** `Origin` 头：UC 与蓝奏优享的 CDN 会校验跨域来源 */
-        origin: String? = null,
-        /** `Sec-Ch-Ua` 客户端提示（UC 游客链路），与游客 UA 配套 */
-        secChUa: String? = null,
-        /**
-         * 调用方已知的文件大小（云盘分享的列表接口直接给了 `fsize`）。
-         * 0 表示未知，交给引擎自己探测 —— 探测要发 HEAD，而夸克这类 CDN 常直接 403，
-         * 已知大小时先填上，UI 才能从一开始就显示正确的总大小与百分比。
-         */
-        totalSize: Long = 0L,
-        /** C2：同一文件的备选直链（各自带专属请求头）；空列表 = 老的单源行为 */
-        altSources: List<DownloadSource> = emptyList(),
+        savePath: Path?,
+        threads: Int,
+        referer: String?,
+        cookie: String?,
+        userAgent: String?,
+        origin: String?,
+        secChUa: String?,
+        totalSize: Long,
+        altSources: List<DownloadSource>,
     ): String {
         val trimmedUrl = url.trim()
         require(trimmedUrl.isNotEmpty()) { "下载链接不能为空" }
@@ -327,7 +324,7 @@ class DownloadEngine(
      * 只删 `{name}.hls`，不动最终 mp4 —— 失败与降级完成时那个 mp4 可能不存在或就是用户要的（v7-P2-3）。
      * 任务不存在、不是 HLS、目录已经不在了都返回 0，调用方据此给「没有可清理的分片」。
      */
-    fun cleanupHlsSegments(taskId: String): Long {
+    override fun cleanupHlsSegments(taskId: String): Long {
         val task = getTask(taskId) ?: return 0L
         if (task.type != TaskType.M3u8) return 0L
         val dir = hlsSegmentDir(task.savePath.toFile())
@@ -346,7 +343,7 @@ class DownloadEngine(
     /**
      * 开始/继续下载
      */
-    fun startDownload(taskId: String) {
+    override fun startDownload(taskId: String) {
         val task = synchronized(stateLock) { taskMap[taskId] } ?: return
         if (task.status == DownloadStatus.DOWNLOADING || task.status == DownloadStatus.MERGING) return
         // 重启后 Cookie 不在了（v8-P0-1）：直接给出明确原因，不发一个注定 403 的请求。
@@ -364,7 +361,7 @@ class DownloadEngine(
     /**
      * 暂停下载：断开连接 → 取消协程 → 标记暂停，已下载分片保留
      */
-    fun pauseDownload(taskId: String) {
+    override fun pauseDownload(taskId: String) {
         pauseInternal(taskId)
         scope.launch { dispatch() }
     }
@@ -377,7 +374,7 @@ class DownloadEngine(
      * 「全部暂停」之后下载根本没停，只是换了一批任务在跑（P1-1）。所以这里先把所有目标
      * 一次性置为 PAUSED，最后只调度一次（此时队列已空，不会补位）。
      */
-    fun pauseAllDownloads(): Int {
+    override fun pauseAllDownloads(): Int {
         val ids = synchronized(stateLock) {
             taskMap.values
                 .filter {
@@ -406,7 +403,7 @@ class DownloadEngine(
      * 暂停 / 取消 / 删除，不含设置变更，用户把并发从 1 改成 8 后排队任务要等下一次
      * 事件才会动，看起来像设置没生效（P1-6）。
      */
-    fun requestDispatch() {
+    override fun requestDispatch() {
         scope.launch { dispatch() }
     }
 
@@ -415,7 +412,7 @@ class DownloadEngine(
      *
      * 已完成的任务不删除文件；暂停仍走 [pauseDownload]，保留断点。
      */
-    fun cancelDownload(taskId: String) {
+    override fun cancelDownload(taskId: String) {
         val job = interrupt(taskId)
         job?.let { stoppingJobs[taskId] = it }
         activeJobs.remove(taskId)
@@ -456,7 +453,7 @@ class DownloadEngine(
      * 并且由 UI 先问用户一句。临时文件（`.partN` / `.offset` / `{name}.hls`）不受这个参数影响，
      * 它们不是用户的成品，一律清理。
      */
-    fun removeTask(taskId: String, deleteFile: Boolean = false) {
+    override fun removeTask(taskId: String, deleteFile: Boolean) {
         val job = interrupt(taskId)
         activeJobs.remove(taskId)
         val task = synchronized(stateLock) {
@@ -493,7 +490,7 @@ class DownloadEngine(
         scope.launch { dispatch() }
     }
 
-    fun getTask(taskId: String): DownloadTask? = synchronized(stateLock) { taskMap[taskId] }
+    override fun getTask(taskId: String): DownloadTask? = synchronized(stateLock) { taskMap[taskId] }
 
     /**
      * 删除全部任务（已完成 + 进行中 + 未完成）。
@@ -504,7 +501,7 @@ class DownloadEngine(
      * @param deleteFile 为 true 时连磁盘文件一起删；「全部删除」传 false，避免误点清空下载目录
      * @return 实际移除的任务数
      */
-    fun removeAllTasks(deleteFile: Boolean = false): Int {
+    override fun removeAllTasks(deleteFile: Boolean): Int {
         // 先取快照再删：removeTask 内部会改 taskMap，边遍历边删会抛 ConcurrentModificationException
         val ids = synchronized(stateLock) { taskMap.keys.toList() }
         ids.forEach { removeTask(it, deleteFile) }
@@ -1860,7 +1857,7 @@ class DownloadEngine(
     /**
      * 关闭引擎：取消所有任务与协程作用域
      */
-    fun shutdown() {
+    override fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
         activeJobs.clear()
         stoppingJobs.clear()

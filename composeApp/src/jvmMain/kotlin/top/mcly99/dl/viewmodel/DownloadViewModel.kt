@@ -9,7 +9,9 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import top.mcly99.dl.data.SettingsRepository
 import top.mcly99.dl.engine.DownloadEngine
+import top.mcly99.dl.engine.DownloadOperations
 import top.mcly99.dl.engine.resolveProxy
+import top.mcly99.dl.model.AppSettings
 import top.mcly99.dl.model.DownloadTask
 import top.mcly99.dl.model.DownloadSource
 import top.mcly99.dl.model.DownloadStatus
@@ -49,12 +51,26 @@ import java.nio.file.Paths
  * @see DownloadTask 下载任务数据模型
  * @see AppNew 应用入口点
  */
-class DownloadViewModel {
-    private val engine = DownloadEngine()
+class DownloadViewModel(
+    /**
+     * 下载引擎。生产用 [DownloadEngine]，测试注入纯内存假实现（P3-T2 窄接口 [DownloadOperations]）。
+     *
+     * 这里不直接依赖 1900 行的 [DownloadEngine]：VM 只用到状态流、增删任务、并发/限速配置
+     * 这 20 个成员，收在接口里才能不起网络、不落磁盘地测「×」按钮、全部开始这些状态逻辑。
+     */
+    private val engine: DownloadOperations = DownloadEngine(),
+    /**
+     * ViewModel 自有作用域，关闭时统一取消，避免 MainScope 泄漏。
+     * 测试注入 `StandardTestDispatcher` 的作用域，`advanceUntilIdle()` 才能推进状态收集。
+     */
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob()),
+    /**
+     * 设置读取入口。默认读用户配置；测试注入固定值，避免单测读写 `~/.mclydownload/`
+     * 并让「按配置注入引擎」这件事可断言。
+     */
+    private val settingsLoader: () -> AppSettings = { SettingsRepository.load() },
+) {
 
-    /** ViewModel 自有作用域，关闭时统一取消，避免 MainScope 泄漏 */
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    
     // 所有下载任务列表
     var tasks by mutableStateOf<List<DownloadTask>>(emptyList())
         private set
@@ -256,7 +272,7 @@ class DownloadViewModel {
      */
     private fun loadSettings() {
         try {
-            val settings = SettingsRepository.load()
+            val settings = settingsLoader()
             if (settings.defaultThreads in availableThreadOptions) {
                 engine.downloadThreadsPerFile = settings.defaultThreads
             } else {
