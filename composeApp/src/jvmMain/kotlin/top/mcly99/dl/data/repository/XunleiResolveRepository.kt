@@ -11,7 +11,6 @@ package top.mcly99.dl.data.repository
 import top.mcly99.dl.data.db.XunleiAccountEntity
 import top.mcly99.dl.data.network.ShareLinkParser
 import top.mcly99.dl.data.network.XunleiApi
-import top.mcly99.dl.data.network.XunleiConstants
 import top.mcly99.dl.data.network.model.DownloadLink
 import top.mcly99.dl.data.network.model.ShareFile
 import top.mcly99.dl.data.network.model.ShareSession

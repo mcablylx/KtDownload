@@ -399,10 +399,7 @@ object XunleiWebCredential {
      */
     fun isValidToken(value: String): Boolean =
         value.length in 16..16384 &&
-            TOKEN_CHARS.matches(value) &&
-            value != "null" &&
-            value != "undefined"
-
+                TOKEN_CHARS.matches(value)
     private val TOKEN_CHARS = Regex("^[A-Za-z0-9._~+/=-]+$")
     private val CONTROL_CHARS = Regex("[\\x00-\\x1f\\x7f]")
 }

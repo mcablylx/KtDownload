@@ -1,26 +1,6 @@
 package top.mcly99.dl.engine.clouddrive
 
-import top.mcly99.dl.data.network.BaiduApi
-import top.mcly99.dl.data.network.C139Api
-import top.mcly99.dl.data.network.GuangYaApi
-import top.mcly99.dl.data.network.GuangYaConstants
-import top.mcly99.dl.data.network.GuangYaDevice
-import top.mcly99.dl.data.network.ILanzouApi
-import top.mcly99.dl.data.network.ILanzouConstants
-import top.mcly99.dl.data.network.LanzouApi
-import top.mcly99.dl.data.network.LanzouConstants
-import top.mcly99.dl.data.network.Pan115Api
-import top.mcly99.dl.data.network.Pan115Constants
-import top.mcly99.dl.data.network.Pan123Api
-import top.mcly99.dl.data.network.Pan123Constants
-import top.mcly99.dl.data.network.QuarkApi
-import top.mcly99.dl.data.network.QuarkConstants
-import top.mcly99.dl.data.network.SharePlatform
-import top.mcly99.dl.data.network.UCApi
-import top.mcly99.dl.data.network.UCConstants
-import top.mcly99.dl.data.network.XunleiApi
-import top.mcly99.dl.data.network.XunleiDeviceFingerprint
-import top.mcly99.dl.data.network.WebCaptchaInit
+import top.mcly99.dl.data.network.*
 import top.mcly99.dl.data.network.model.ShareExpire
 import top.mcly99.dl.data.network.model.ShareInfo
 
@@ -271,7 +251,7 @@ private object C139Adapter : MyDrivePlatformAdapter {
         return MyDrivePage(files.map { it.toMyDriveFile() }, next)
     }
 
-    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String? =
+    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String =
         api.createDir(parentId, name, ctx.credential)
 
     override suspend fun rename(ctx: DriveContext, file: MyDriveFile, newName: String): Boolean =
@@ -310,7 +290,7 @@ private object Pan123Adapter : MyDrivePlatformAdapter {
         return MyDrivePage(files.map { it.toMyDriveFile() }, next)
     }
 
-    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String? =
+    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String =
         api.createDir(parentId, name, ctx.credential)
 
     override suspend fun rename(ctx: DriveContext, file: MyDriveFile, newName: String): Boolean {
@@ -517,7 +497,7 @@ private object GuangYaAdapter : MyDrivePlatformAdapter {
     override suspend fun list(ctx: DriveContext, dirId: String, cursor: String?): MyDrivePage =
         MyDrivePage(api.listCloudFiles(token(ctx), dirId).map { it.toMyDriveFile() })
 
-    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String? =
+    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String =
         api.createDir(token(ctx), parentId, name)
 
     override suspend fun rename(ctx: DriveContext, file: MyDriveFile, newName: String): Boolean {
@@ -607,7 +587,7 @@ private object LanzouAdapter : MyDrivePlatformAdapter {
             .map { it.toMyDriveFile() })
     }
 
-    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String? {
+    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String {
         val (uid, vei) = params(ctx)
         return api.createFolder(ctx.credential, uid, vei, numeric(parentId), name)
     }
@@ -676,7 +656,7 @@ private object ILanzouAdapter : MyDrivePlatformAdapter {
         return MyDrivePage(api.listFiles(token, uuid, dirId).map { it.toMyDriveFile() })
     }
 
-    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String? {
+    override suspend fun createFolder(ctx: DriveContext, parentId: String, name: String): String {
         val (token, uuid) = creds(ctx)
         return api.createDir(token, uuid, numeric(parentId), name)
     }
