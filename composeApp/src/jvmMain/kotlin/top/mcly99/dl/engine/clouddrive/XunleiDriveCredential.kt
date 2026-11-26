@@ -47,6 +47,27 @@ data class XunleiDriveCredential(
     fun preview(): String =
         if (accessToken.isBlank()) "" else "token ${accessToken.take(8)}…"
 
+    /**
+     * 拼出一次请求要的三件套（access_token + X-Device-Id + X-Captcha-Token）。
+     *
+     * **设备号必须非空**：`X-Device-Id: ` 空值会被服务端直接判
+     * `invalid_argument / device_id is empty`，用户看到的就是「请求参数错误」。
+     * 网页登录在「退出后重新登录」时经常抓不到 `deviceid` Cookie，凭证里就成了空串，
+     * 所以要由调用方提供本地设备指纹兜底。
+     *
+     * **验证码与设备号绑定**（服务端校验失败会回 `captcha_invalid / device not match`）：
+     * 一旦设备号是兜底来的，登录时带回来的那条 captcha 一定属于网页侧另一个设备，
+     * 复用它只会稳定失败，因此丢弃、交给调用方按当前设备号现签。
+     */
+    fun requestIdentity(fallbackDeviceId: () -> String): XunleiRequestIdentity {
+        val usableDevice = deviceId.ifBlank { fallbackDeviceId() }
+        return XunleiRequestIdentity(
+            accessToken = accessToken,
+            deviceId = usableDevice,
+            captchaToken = if (deviceId.isBlank()) "" else captchaToken,
+        )
+    }
+
     companion object {
         private const val FIELD_ACCESS = "accessToken"
         private const val FIELD_REFRESH = "refreshToken"
@@ -177,3 +198,15 @@ data class XunleiDriveCredential(
         }
     }
 }
+
+/**
+ * 一次迅雷请求的身份（三件套）。
+ *
+ * 单独成类型而不是 `Triple`：这三项**必须来自同一个账号、同一台设备**，
+ * 位置参数一旦传反（device 与 captcha 互换）服务端只会回一句「参数错误」，很难排查。
+ */
+data class XunleiRequestIdentity(
+    val accessToken: String,
+    val deviceId: String,
+    val captchaToken: String,
+)

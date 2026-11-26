@@ -269,9 +269,16 @@ class XunleiApi(
         }.getOrNull()
     }
 
-    /** 缓存当前用户 ID（从 access_token JWT 解析），供 captcha/init 的 meta 使用 */
-    fun cacheUserId(accessToken: String) {
-        if (currentUserId.isBlank()) currentUserId = jwtSub(accessToken)
+    /**
+     * 缓存当前用户 ID（从 access_token JWT 解析），供 captcha/init 的 meta 使用。
+     *
+     * @param force 多账号 / 换号场景下必须为 true：原来的「空才写」会让 B 账号继续用
+     *   A 的 user_id 去换 captcha，拿到降级 token（写操作被拒），而错误文案完全指不到这里。
+     *   解析不出 sub（非常规 token）时保留旧值，不要用一个空串把能用的值冲掉。
+     */
+    fun cacheUserId(accessToken: String, force: Boolean = false) {
+        val parsed = jwtSub(accessToken)
+        if (parsed.isNotBlank() && (force || currentUserId.isBlank())) currentUserId = parsed
     }
 
     /**

@@ -97,12 +97,31 @@ fun MyDriveScreen(
                     // 未登录要先判，否则 loadDir 写下的 error=loginRequired 会抢先显示成红字
                     vm.platform != null && !vm.isLoggedIn ->
                         LoginRequiredPane(strings, onLogin, vm.platform)
-                    vm.error != null -> Text(
-                        vm.error.orEmpty(),
-                        color = FlowDownColors.Destructive,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.align(Alignment.Center),
-                    )
+                    vm.error != null -> Column(
+                        Modifier.align(Alignment.Center),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            vm.error.orEmpty(),
+                            color = FlowDownColors.Destructive,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        // 读取失败几乎都是登录态失效（例如迅雷「验证码与当前登录方式不匹配」）。
+                        // 直接在这里给出回登录页的入口，用户不必自己绕到「云盘」页再找平台卡片。
+                        val platform = vm.platform
+                        if (platform != null) {
+                            Spacer(Modifier.height(12.dp))
+                            CompactButton(
+                                text = strings.reloginAction,
+                                onClick = {
+                                    vm.clearError()
+                                    onLogin(platform)
+                                },
+                                icon = Icons.Default.Lock,
+                                primary = true,
+                            )
+                        }
+                    }
                     vm.files.isEmpty() -> Text(
                         if (vm.isLoggedIn) strings.emptyDir else strings.loginHint,
                         color = FlowDownColors.MutedForeground,

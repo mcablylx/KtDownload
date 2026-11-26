@@ -19,6 +19,8 @@ data class MyDriveStrings(
     val loginHint: String,
     /** 未登录引导区的登录按钮 */
     val loginAction: String,
+    /** 读取失败（多半是登录态失效）时，错误下方的一键重登按钮 */
+    val reloginAction: String,
     /** 参数：账号备注（或默认名）、凭证掩码 */
     val accountLabel: (String, String) -> String,
     val primaryBadge: String,
@@ -121,6 +123,7 @@ private val zhCNMyDrive = MyDriveStrings(
     notLoggedIn = "未登录",
     loginHint = "请先到「云盘」页登录该平台，再来这里管理文件",
     loginAction = "登录该平台",
+    reloginAction = "去网页重新登录",
     accountLabel = { name, masked -> "$name · $masked" },
     primaryBadge = "主账号",
     unnamedAccount = "未命名账号",
@@ -193,6 +196,7 @@ private val enUSMyDrive = MyDriveStrings(
     notLoggedIn = "Not signed in",
     loginHint = "Sign in on the Cloud Drive page first, then come back here",
     loginAction = "Sign in",
+    reloginAction = "Sign in again on the web",
     accountLabel = { name, masked -> "$name · $masked" },
     primaryBadge = "Primary",
     unnamedAccount = "Unnamed account",

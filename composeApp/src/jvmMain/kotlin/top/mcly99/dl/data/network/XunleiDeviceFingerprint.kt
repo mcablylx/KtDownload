@@ -72,11 +72,33 @@ object XunleiDeviceFingerprint {
         }
     }
 
-    fun deviceId(): String = deviceId
+    /**
+     * 取设备号（首次调用时自动 [init]，保证是持久化的随机指纹而非官方常量）。
+     *
+     * 三个 getter 都先 init：设备号是**请求头 X-Device-Id 的唯一来源**之一，
+     * 空值会被服务端判 `invalid_argument / device_id is empty`（就是「请求参数错误」）。
+     * 依赖调用方记得在启动时 init 太脆，这里收口成「谁取谁保证就绪」。
+     */
+    fun deviceId(): String {
+        ensure()
+        return deviceId
+    }
 
-    fun peerId(): String = peerId
+    fun peerId(): String {
+        ensure()
+        return peerId
+    }
 
-    fun deviceSign(): String = deviceSign
+    fun deviceSign(): String {
+        ensure()
+        return deviceSign
+    }
+
+    /** 幂等初始化；未初始化时取值会拿到官方抓包常量（多用户共享，风控不友好） */
+    private fun ensure(): Boolean {
+        if (!initialized) init()
+        return initialized
+    }
 
     /** devicesign：div101.{deviceId}{md5(sha1(deviceId + package_name + appid + app_key))} */
     private fun buildDeviceSign(id: String): String {

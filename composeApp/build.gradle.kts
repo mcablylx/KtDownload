@@ -139,9 +139,18 @@ compose.desktop {
     application {
         mainClass = "top.mcly99.dl.MainKt"
 
-        // release 构建默认开启 ProGuard，必须显式接入规则文件：
-        // 否则 -dontwarn / -keep 等规则不生效，桌面端用不到的可选依赖警告会让打包失败。
+        // release 构建默认会跑 ProGuard 的 shrink（删「看起来没人引用」的类）。
+        // 桌面端的第三方库大量依赖反射 / JNA 接口映射 / native 层按类名加载，
+        // 静态分析看不到这些引用，删了以后开发环境（不裁剪）完全正常、只有安装包出事：
+        //   - JCEF：org.cef.callback.CefCommandLine_N 等被删 → 登录页浏览器白屏
+        //            （jcef-api 从 199 个类被裁到 73 个）；
+        //   - vlcj/os: 411 → 121 个类，播放内核随时可能坏；
+        //   - okio: 107 → 45 个类，出过 VerifyError。
+        // 裁剪换来的体积收益约 55 MB（主要是 material-icons-extended 37 MB 和一批
+        // 未用到的 compose/okhttp 类），占安装包 16%，但已经把两个功能打坏过，
+        // 因此整体关闭；规则文件保留在 proguard-rules.pro，里面已写好重新启用所需的 keep 规则。
         buildTypes.release.proguard {
+            isEnabled = false
             configurationFiles.from(file("proguard-rules.pro"))
         }
         // vlcj 通过 DirectByteBuffer 读 native 缓冲，JDK 17+ 需要显式开放 java.nio

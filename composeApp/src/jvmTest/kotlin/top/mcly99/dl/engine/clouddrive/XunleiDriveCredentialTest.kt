@@ -113,4 +113,36 @@ class XunleiDriveCredentialTest {
         val cred = XunleiDriveCredential(access, refresh, "dev")
         assertEquals("token eyJhbGci…", cred.preview())
     }
+
+    /**
+     * 设备号缺失（网页退出重登后抓不到 deviceid Cookie）：
+     * 必须用本地指纹兜底，且**丢弃**登录时带回来的那条 captcha —— 它绑定的是网页侧另一个设备，
+     * 复用只会稳定回 `device not match`。空 X-Device-Id 则是 `device_id is empty`
+     * （两者在 UI 上都表现为「请求参数错误 / 验证码无效」）。
+     */
+    @Test
+    fun missing_device_id_falls_back_and_drops_stale_captcha() {
+        val cred = XunleiDriveCredential(accessToken = access, captchaToken = "C".repeat(32))
+
+        val id = cred.requestIdentity { "local-device" }
+
+        assertEquals(access, id.accessToken)
+        assertEquals("local-device", id.deviceId)
+        assertEquals("", id.captchaToken)
+    }
+
+    /** 设备号齐全时原样复用，captcha 也能继续用（少一次 captcha/init 请求） */
+    @Test
+    fun complete_credential_keeps_its_own_device_and_captcha() {
+        val cred = XunleiDriveCredential(
+            accessToken = access,
+            deviceId = "dev-9",
+            captchaToken = "C".repeat(32),
+        )
+
+        val id = cred.requestIdentity { error("不应该用到兜底设备号") }
+
+        assertEquals("dev-9", id.deviceId)
+        assertEquals("C".repeat(32), id.captchaToken)
+    }
 }

@@ -20,6 +20,7 @@ import top.mcly99.dl.engine.clouddrive.MyDriveApi
 import top.mcly99.dl.engine.clouddrive.MyDriveCapabilities
 import top.mcly99.dl.engine.clouddrive.MyDriveFile
 import top.mcly99.dl.engine.clouddrive.MyDriveQuota
+import top.mcly99.dl.utils.AppLogger
 import top.mcly99.dl.engine.clouddrive.MyDriveShareResult
 import top.mcly99.dl.theme.MyDriveStrings
 import top.mcly99.dl.theme.myDriveStrings
@@ -219,6 +220,16 @@ class MyDriveViewModel(
             loadDir(dirId, generation)
             loadQuota(generation)
         }
+    }
+
+    /**
+     * 清掉当前错误提示。
+     *
+     * 「去网页重新登录」点了之后马上会切到登录页，这里先把红字收掉：
+     * 否则从登录页退回来（或下次进本页）还停在旧的失败提示上。
+     */
+    fun clearError() {
+        error = null
     }
 
     /**
@@ -498,6 +509,12 @@ class MyDriveViewModel(
             files = emptyList()
             nextCursor = null
             selectedIds = emptySet()
+            // 只显示不落日志的话，用户报「读取失败：xxx」时日志里什么都没有（这次排查就卡在这）。
+            // 记平台 + 目录 + 原因；凭证/URL 不进日志。
+            AppLogger.warn(
+                "MyDrive",
+                "列目录失败 platform=${platform?.name} dir=$dirId: ${e.message}",
+            )
             error = t().loadFailed(e.message ?: e.javaClass.simpleName)
         } finally {
             if (generation == loadGeneration) loading = false

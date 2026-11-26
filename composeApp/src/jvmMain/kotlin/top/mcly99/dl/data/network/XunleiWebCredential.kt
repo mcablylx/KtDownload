@@ -170,6 +170,17 @@ object XunleiWebCredential {
               break;
             }
           }catch(e){}
+          // 退出登录会清掉 deviceid Cookie（重登后「读取失败：请求参数错误」的根因）：
+          // 此时退回 localStorage 里的设备号；仍取不到就交给 Kotlin 侧用本地指纹兜底。
+          if(!data.device_id){
+            try{
+              var ks=['device_id','deviceId','xunlei_device_id'];
+              for(var k=0;k<ks.length;k++){
+                var v=localStorage.getItem(ks[k]);
+                if(v&&/^[0-9a-fA-F]{32}${'$'}/.test(v)){data.device_id=v;break;}
+              }
+            }catch(e){}
+          }
           return encodeURIComponent(JSON.stringify(data));
         }catch(e){return ''}})()
     """.trimIndent()
@@ -227,6 +238,17 @@ object XunleiWebCredential {
               break;
             }
           }catch(e){}
+          // 退出登录会清掉 deviceid Cookie（重登后「读取失败：请求参数错误」的根因）：
+          // 此时退回 localStorage 里的设备号；仍取不到就交给 Kotlin 侧用本地指纹兜底。
+          if(!data.device_id){
+            try{
+              var ks=['device_id','deviceId','xunlei_device_id'];
+              for(var k=0;k<ks.length;k++){
+                var v=localStorage.getItem(ks[k]);
+                if(v&&/^[0-9a-fA-F]{32}${'$'}/.test(v)){data.device_id=v;break;}
+              }
+            }catch(e){}
+          }
           var payload=encodeURIComponent(JSON.stringify(data));
           var size=3000;
           var n=Math.ceil(payload.length/size); if(n<1)n=1;

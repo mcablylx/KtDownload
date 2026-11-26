@@ -19,6 +19,8 @@ import top.mcly99.dl.data.network.SharePlatform
 import top.mcly99.dl.data.network.UCApi
 import top.mcly99.dl.data.network.UCConstants
 import top.mcly99.dl.data.network.XunleiApi
+import top.mcly99.dl.data.network.XunleiDeviceFingerprint
+import top.mcly99.dl.data.network.WebCaptchaInit
 import top.mcly99.dl.data.network.model.ShareExpire
 import top.mcly99.dl.data.network.model.ShareInfo
 
@@ -422,7 +424,18 @@ private object Pan115Adapter : MyDrivePlatformAdapter {
 
 /** 迅雷每个接口都要 accessToken + deviceId + captchaToken 三件套；凭证是结构化 JSON */
 private object XunleiAdapter : MyDrivePlatformAdapter {
-    private val api = XunleiApi()
+    /**
+     * 「我的网盘」这条链路的迅雷请求**全部是网页 token**（登录页走 pan.xunlei.com）。
+     *
+     * 所以 captcha 必须用网页 9 盐现签：不注入这个刷新器时，[XunleiApi] 会回退 App 通道
+     * 的 10 盐签名，服务端判 `client_id not match`，用户看到「验证码与当前登录方式不匹配」——
+     * 这正是「退出重登后一直读不了」的前半段原因。
+     */
+    private val api = XunleiApi().apply {
+        webCaptchaRefresher = { deviceId, action ->
+            (initWebCaptcha(deviceId, action) as? WebCaptchaInit.Ok)?.captcha
+        }
+    }
     override val platform = SharePlatform.XUNLEI
     override val capabilities: MyDriveCapabilities = fullCapabilities()
 
@@ -430,16 +443,20 @@ private object XunleiAdapter : MyDrivePlatformAdapter {
      * 迅雷个人网盘的根是**空串**，不是 `"0"`：`GET /drive/v1/files?parent_id=` 才表示根目录，
      * 传 `"0"` 会被服务端当成一个不存在的文件夹，直接回「文件(夹)不存在」。
      *
-     * 注意别和**分享链路**的根哨兵混为一谈：[CloudDriveService.rootDirFid] 给迅雷返回 `"0"`，
-     * 那是 `getShare` / `getShareDetail` 里「顶层分享页」的判定值（见 XunleiResolveRepository），
-     * 两套语义不同。
+     * 注意别和**分享链路**的根哨兵混为一谈：[CloudDriveService] 给迅雷返回 `"0"`，
+     * 那是 `getShare` / `getShareDetail` 里「顶层分享页」的判定值，两套语义不同。
      */
     override val rootDirId: String = ""
 
     private fun creds(ctx: DriveContext): Triple<String, String, String> {
         val c = XunleiDriveCredential.parse(ctx.credential)?.takeIf { it.isUsable }
             ?: throw IllegalStateException("迅雷网盘凭证无效，请重新登录")
-        return Triple(c.accessToken, c.deviceId, c.captchaToken)
+        // device_id 为空时用本地设备指纹兜底，并丢弃与之不匹配的 captcha（详见 requestIdentity）。
+        // 空 X-Device-Id 会被服务端判 invalid_argument，用户看到的就是「请求参数错误」。
+        val id = c.requestIdentity { XunleiDeviceFingerprint.deviceId() }
+        // captcha/init 的 meta 必须带真实 user_id，否则拿到的是降级 token（写操作会被拒）
+        api.cacheUserId(c.accessToken, force = true)
+        return Triple(id.accessToken, id.deviceId, id.captchaToken)
     }
 
     override suspend fun list(ctx: DriveContext, dirId: String, cursor: String?): MyDrivePage {

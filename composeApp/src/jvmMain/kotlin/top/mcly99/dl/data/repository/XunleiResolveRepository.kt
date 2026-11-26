@@ -15,6 +15,7 @@ import top.mcly99.dl.data.network.XunleiConstants
 import top.mcly99.dl.data.network.model.DownloadLink
 import top.mcly99.dl.data.network.model.ShareFile
 import top.mcly99.dl.data.network.model.ShareSession
+import top.mcly99.dl.engine.clouddrive.XunleiDriveCredential
 
 /**
  * 迅雷分享解析仓库：解析分享 → 转存到临时目录 → 文件详情取直链。
@@ -83,7 +84,8 @@ class XunleiResolveRepository(
         deviceIdProvider() ?: throw IllegalStateException("缺少设备标识")
 
     /** 设备标识：未登录时回退游客设备标识，别让「缺少设备标识」把匿名列目录挡在门外 */
-    private suspend fun deviceIdOrGuest(): String = deviceIdProvider() ?: guestDeviceId
+    private suspend fun deviceIdOrGuest(): String =
+        deviceIdProvider()?.takeIf { it.isNotBlank() } ?: guestDeviceId
 
     private suspend fun captcha(): String = captchaProvider() ?: ""
 
@@ -102,7 +104,14 @@ class XunleiResolveRepository(
         val account = accountByTokenProvider?.invoke(credential)
             ?: return Identity(access(), deviceId(), captcha())
         api.cacheUserId(account.accessToken)
-        return Identity(account.accessToken, account.deviceId, account.captchaToken)
+        // 与「我的网盘」同一条口径：设备号缺失时用本地指纹兜底，并丢弃不匹配的 captcha
+        // （空 device 会被判 device_id is empty；device 与 captcha 不同源则是 device not match）
+        val id = XunleiDriveCredential(
+            accessToken = account.accessToken,
+            deviceId = account.deviceId,
+            captchaToken = account.captchaToken,
+        ).requestIdentity { guestDeviceId }
+        return Identity(id.accessToken, id.deviceId, id.captchaToken)
     }
 
     /**
