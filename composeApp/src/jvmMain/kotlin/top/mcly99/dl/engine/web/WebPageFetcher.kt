@@ -156,7 +156,10 @@ open class WebPageFetcher(
             // 用 String(bytes, charset) 而不是严格解码器：截断可能切在多字节字符中间，
             // 严格模式会直接抛异常，而我们要的是「尽量解析」。
             val html = String(body, charset).removePrefix("\uFEFF")
-            AppLogger.debug("WebPageFetcher", "抓取成功: ${connection.url} (${body.size} 字节, $charset)")
+            AppLogger.debug(
+                "WebPageFetcher",
+                "抓取成功: ${redactUrl(connection.url.toString())} (${body.size} 字节, $charset)",
+            )
             return FetchedPage(connection.url.toString(), html, charset.name())
         } catch (e: FetchFailure) {
             throw e

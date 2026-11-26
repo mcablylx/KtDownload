@@ -573,7 +573,25 @@ class CloudDriveService(
             // 网页 token 的 captcha 只能用网页 9 盐现签，App 通道的签名会被判 client_id not match
             xunleiApi.webCaptchaRefresher = { deviceId, action ->
                 val id = deviceId.ifBlank { tokens()?.deviceId.orEmpty() }
-                (xunleiApi.initWebCaptcha(id, action) as? WebCaptchaInit.Ok)?.captcha
+                when (val result = xunleiApi.initWebCaptcha(id, action)) {
+                    is WebCaptchaInit.Ok -> result.captcha
+                    is WebCaptchaInit.ClientIdMismatch -> {
+                        top.mcly99.dl.utils.AppLogger.warn(
+                            "CloudDrive/Xunlei",
+                            "网页 captcha init 返回 client_id 不匹配，需重新登录迅雷网页版" +
+                                "（${top.mcly99.dl.data.network.XunleiWebSignConfig.diagnostics()}）",
+                        )
+                        null
+                    }
+                    is WebCaptchaInit.Failed -> {
+                        top.mcly99.dl.utils.AppLogger.warn(
+                            "CloudDrive/Xunlei",
+                            "网页 captcha init 失败: ${result.reason}" +
+                                "（${top.mcly99.dl.data.network.XunleiWebSignConfig.diagnostics()}）",
+                        )
+                        null
+                    }
+                }
             }
             // 请求侧 401 / unauthenticated 的兜底刷新（与仓库层的主动刷新同一条路）
             xunleiApi.refreshTokenProvider = { deviceId -> refreshXunleiToken(xunleiApi, deviceId) }

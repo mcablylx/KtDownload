@@ -79,7 +79,7 @@ class HttpProbe(
             // 在这里再 setRequestMethod 会抛 Already connected 被吞成 null（P0-1）。
             val code = connection.responseCode
             if (code !in 200..299) {
-                AppLogger.debug("HttpProbe", "播放列表请求失败: $code $url")
+                AppLogger.debug("HttpProbe", "播放列表请求失败: $code ${redactUrl(url)}")
                 return null
             }
             val body = readLimited(connection.inputStream, maxBytes)
@@ -87,7 +87,11 @@ class HttpProbe(
             val text = String(body, StandardCharsets.UTF_8).removePrefix("\uFEFF")
             return ProbedText(text, connection.url.toString())
         } catch (e: Exception) {
-            AppLogger.debug("HttpProbe", "读取播放列表失败: ${e.message} ($url)")
+            // e.message 也可能带完整 URL：交给共享脱敏器兜底，不把签名参数写进日志
+            AppLogger.debug(
+                "HttpProbe",
+                "读取播放列表失败: ${top.mcly99.dl.utils.SensitiveTextRedactor.redact(e.message.orEmpty())} (${redactUrl(url)})",
+            )
             return null
         } finally {
             runCatching { connection.disconnect() }

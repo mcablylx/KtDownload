@@ -83,13 +83,25 @@ class LicenseStringsTest {
             "resources/common/yunx-desktop/LICENSE.txt",
         ).forEach { relative ->
             var dir: File? = File(".").absoluteFile
-            var found = false
+            var file: File? = null
             repeat(5) {
                 val current = dir
-                if (current != null && File(current, relative).isFile) found = true
+                if (current != null && file == null) {
+                    File(current, relative).takeIf { it.isFile }?.let { file = it }
+                }
                 dir = current?.parentFile
             }
-            assertTrue(found, "Declared license file is missing: $relative")
+            val resolved = file
+            assertTrue(resolved != null, "Declared license file is missing: $relative")
+            // 文件存在还不够：占位/空文件同样会让「打开许可目录」失效，且不满足 AGPL §5(a)
+            val text = resolved.readText()
+            assertTrue(text.length > 1000, "License file looks like a placeholder: $relative")
+            if (relative.contains("yunx-desktop")) {
+                assertTrue(
+                    text.contains("GNU AFFERO GENERAL PUBLIC LICENSE"),
+                    "YunX-Desktop license must ship the full AGPL-3.0 text: $relative",
+                )
+            }
         }
     }
 }

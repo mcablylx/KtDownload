@@ -413,7 +413,23 @@ private object XunleiAdapter : MyDrivePlatformAdapter {
      */
     private val api = XunleiApi().apply {
         webCaptchaRefresher = { deviceId, action ->
-            (initWebCaptcha(deviceId, action) as? WebCaptchaInit.Ok)?.captcha
+            when (val result = initWebCaptcha(deviceId, action)) {
+                is WebCaptchaInit.Ok -> result.captcha
+                is WebCaptchaInit.ClientIdMismatch -> {
+                    top.mcly99.dl.utils.AppLogger.warn(
+                        "MyDrive/Xunlei",
+                        "网页 captcha init 返回 client_id 不匹配，需重新登录迅雷网页版（${XunleiWebSignConfig.diagnostics()}）",
+                    )
+                    null
+                }
+                is WebCaptchaInit.Failed -> {
+                    top.mcly99.dl.utils.AppLogger.warn(
+                        "MyDrive/Xunlei",
+                        "网页 captcha init 失败: ${result.reason}（${XunleiWebSignConfig.diagnostics()}）",
+                    )
+                    null
+                }
+            }
         }
     }
     override val platform = SharePlatform.XUNLEI

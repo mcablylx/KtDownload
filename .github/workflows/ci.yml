@@ -50,3 +50,37 @@ jobs:
             composeApp/build/test-results/jvmTest
           if-no-files-found: ignore
           retention-days: 14
+
+      # 把每个测试类的用例数/失败数写进 job summary：绿/红之外还要能一眼看到
+      # 失败在哪、有没有被静默 skip。纯只读汇总，解析异常不影响上面的测试结论。
+      - name: Publish test summary
+        if: always()
+        run: |
+          python3 - <<'PY' || echo "test summary unavailable"
+          import glob, os, xml.etree.ElementTree as ET
+          files = sorted(glob.glob("composeApp/build/test-results/jvmTest/TEST-*.xml"))
+          out = os.environ.get("GITHUB_STEP_SUMMARY")
+          total = failed = errors = skipped = 0
+          bad = []
+          for f in files:
+              try:
+                  r = ET.parse(f).getroot()
+              except Exception:
+                  continue
+              t = int(r.get("tests", 0)); fa = int(r.get("failures", 0))
+              er = int(r.get("errors", 0)); sk = int(r.get("skipped", 0))
+              total += t; failed += fa; errors += er; skipped += sk
+              if fa or er:
+                  bad.append((r.get("name", f), fa + er))
+          lines = ["## jvmTest 结果", "",
+                   f"- 测试类：{len(files)}，用例：{total}，失败：{failed}，错误：{errors}，跳过：{skipped}", ""]
+          if bad:
+              lines += ["### 失败用例", ""] + [f"- `{n}` ({c})" for n, c in bad]
+          else:
+              lines += ["全部通过 ✅"]
+          text = "\n".join(lines) + "\n"
+          print(text)
+          if out:
+              with open(out, "a", encoding="utf-8") as fh:
+                  fh.write(text)
+          PY

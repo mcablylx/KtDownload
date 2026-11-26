@@ -13,14 +13,17 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import top.mcly99.dl.APP_VERSION
 import top.mcly99.dl.engine.hls.FfmpegMuxer
 import top.mcly99.dl.engine.hls.HlsDownloader
@@ -74,6 +77,16 @@ class DownloadEngine(
 ) : DownloadOperations {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    /**
+     * 收尾清理协程专用作用域（P1-05）。
+     *
+     * 「取消/删除任务后删 `.partN` / `.offset` / `{name}.hls` / `deleteFile`」这些承诺
+     * 不能挂在 [scope] 上：`shutdown()` 末尾会 `scope.cancel()`，用户取消任务后立刻关应用
+     * 时清理协程会被一起取消，残片留在磁盘上、Windows 下还占着文件句柄。
+     * 这里用独立的 SupervisorJob，只有 [shutdown] 在 join 完成后才取消它。
+     */
+    private val cleanupScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     /** 任务表：写操作统一由 [stateLock] 保护 */
     private val taskMap = ConcurrentHashMap<String, DownloadTask>()
     private val stateLock = Any()
@@ -84,13 +97,68 @@ class DownloadEngine(
     private val activeJobs = ConcurrentHashMap<String, Job>()
 
     /**
-     * 已取消但可能仍在收尾的协程。
+     * 已取消但可能仍在收尾的协程（P1-04）。
      *
      * `pauseDownload` / `cancelDownload` 只是 `cancel()`，协程要过一会儿才真正退出
-     * （关文件、写 `.offset`）。用户「暂停 → 立刻继续」时新协程会和它同时写同一个
-     * `.partN`，读到错位的 offset，最后报「分块长度不符」。启动前先 join 它。
+     * （关文件、写 `.offset`）；`removeTask` 还要再起一个删分片的协程。用户「暂停 → 立刻继续」
+     * 时新协程会和它们同时写同一个 `.partN`，读到错位的 offset，最后报「分块长度不符」。
+     *
+     * ★ 一个 taskId 可能**同时有多个**收尾协程（连点「取消→开始→取消→开始」）：
+     * 1.0.3 用单值 `ConcurrentHashMap<String, Job>` 覆盖，旧 job 永久失去 join 点。
+     * 现在改为「每任务一个 Job 列表 + 全部待清理 Job 集合」，启动前逐一 join，
+     * 且要求 [cleaningPaths] 里的路径都释放后才允许复用同名文件。
      */
-    private val stoppingJobs = ConcurrentHashMap<String, Job>()
+    private val stoppingJobs = ConcurrentHashMap<String, MutableList<Job>>()
+
+    /** 全部进行中的收尾协程，供 [shutdown] 统一 join（P1-05）。 */
+    private val pendingCleanups = CopyOnWriteArrayList<Job>()
+
+    /** 正在被清理协程占用的目标路径：清理完成前 [addTask] 不能复用（P1-04）。
+     *  internal：同模块测试可直接构造「清理中」状态做确定性断言。 */
+    internal val cleaningPaths: MutableSet<Path> = ConcurrentHashMap.newKeySet()
+
+    /** 登记一个收尾 Job：同 taskId 用 compute 原子追加，完成后自动移除。 */
+    private fun trackStopping(taskId: String, job: Job) {
+        stoppingJobs.compute(taskId) { _, list ->
+            (list ?: CopyOnWriteArrayList()).apply { add(job) }
+        }
+        job.invokeOnCompletion {
+            stoppingJobs.compute(taskId) { _, list ->
+                list?.apply { remove(job) }?.takeIf { it.isNotEmpty() }
+            }
+        }
+    }
+
+    /** 取某个任务当前所有待 join 的收尾协程快照（CopyOnWriteArrayList 保证并发安全）。 */
+    private fun stoppingSnapshot(taskId: String): List<Job> =
+        stoppingJobs[taskId]?.toList().orEmpty()
+
+    /**
+     * 在不可取消的 [cleanupScope] 上启动一个收尾清理协程，并登记到
+     * [stoppingJobs] / [pendingCleanups] / [cleaningPaths]。
+     *
+     * @param interruptedJob 被 [interrupt] 取消的下载协程，清理前先 join 它（句柄关完才能删）
+     * @param path 本次清理占用的目标文件路径；清理完成后释放
+     */
+    private fun launchCleanup(
+        taskId: String,
+        interruptedJob: Job?,
+        path: Path,
+        block: suspend () -> Unit,
+    ) {
+        cleaningPaths.add(path.toAbsolutePath().normalize())
+        val job = cleanupScope.launch {
+            try {
+                interruptedJob?.let { runCatching { it.join() } }
+                block()
+            } finally {
+                cleaningPaths.remove(path.toAbsolutePath().normalize())
+            }
+        }
+        trackStopping(taskId, job)
+        pendingCleanups.add(job)
+        job.invokeOnCompletion { pendingCleanups.remove(job) }
+    }
 
     /** 调度锁：保证「检查并发上限 → 启动 → 登记」是原子操作 */
     private val dispatchLock = Mutex()
@@ -277,7 +345,10 @@ class DownloadEngine(
             // 否则不同视频的分片会被 `.done` 标记混拼（v3-P1-2）
             val finalPath = handleDuplicateFile(path) { candidate ->
                 (type == TaskType.M3u8 && hlsSegmentDir(candidate.toFile()).exists()) ||
-                    taskMap.values.any { it.savePath == candidate }
+                    taskMap.values.any { it.savePath == candidate } ||
+                    // P1-04：删除/取消任务的清理协程可能还在删 `.partN` / `.offset`，
+                    // 此时复用同名路径会让新任务的分片被旧协程删掉。清理完成前一律递增序号。
+                    cleaningPaths.contains(candidate.toAbsolutePath().normalize())
             }
             DownloadTask(
                 id = id,
@@ -391,7 +462,7 @@ class DownloadEngine(
 
     /** 暂停的公共部分：[pauseDownload] 与 [pauseAllDownloads] 共用，不含调度。 */
     private fun pauseInternal(taskId: String) {
-        interrupt(taskId)?.let { stoppingJobs[taskId] = it }
+        interrupt(taskId)?.let { trackStopping(taskId, it) }
         activeJobs.remove(taskId)
         updateTask(taskId, event = DownloadEvent.PAUSE, speed = 0L)
     }
@@ -414,19 +485,20 @@ class DownloadEngine(
      */
     override fun cancelDownload(taskId: String) {
         val job = interrupt(taskId)
-        job?.let { stoppingJobs[taskId] = it }
+        job?.let { trackStopping(taskId, it) }
         activeJobs.remove(taskId)
         val task = synchronized(stateLock) { taskMap[taskId] }
         updateTask(taskId, event = DownloadEvent.CANCEL, speed = 0L)
         scope.launch { dispatch() }
         if (task == null) return
 
-        // 等下载协程真正退出后再删文件：Windows 下文件句柄未关闭时 delete() 会失败
-        scope.launch {
-            job?.join()
+        // 等下载协程真正退出后再删文件：Windows 下文件句柄未关闭时 delete() 会失败。
+        // 走 launchCleanup（独立不可取消作用域 + 登记 stoppingJobs / cleaningPaths），
+        // 保证「取消后立刻关应用」时这段清理仍会跑完（P1-05），且同名文件不会被立刻重加（P1-04）。
+        launchCleanup(taskId, job, task.savePath) {
             // 期间可能已被重试或删除，任务不在 CANCELLED 状态时不要再动目标文件
             val current = synchronized(stateLock) { taskMap[taskId] }
-            if (current == null || current.status != DownloadStatus.CANCELLED) return@launch
+            if (current == null || current.status != DownloadStatus.CANCELLED) return@launchCleanup
 
             val target = current.savePath.toFile()
             cleanupParts(target)
@@ -455,6 +527,7 @@ class DownloadEngine(
      */
     override fun removeTask(taskId: String, deleteFile: Boolean) {
         val job = interrupt(taskId)
+        job?.let { trackStopping(taskId, it) }
         activeJobs.remove(taskId)
         val task = synchronized(stateLock) {
             val removed = taskMap.remove(taskId)
@@ -466,8 +539,9 @@ class DownloadEngine(
             // 与 cancelDownload 同构：先等下载协程真正退出再删文件。
             // interrupt() 只是 cancel + disconnect，协程可能还停在 read() 或 catch 里，
             // 立刻 cleanupParts 会与它的收尾写盘撞车，把 `.part*` / `.offset` 重建出来（v6-P1-2）。
-            scope.launch {
-                job?.join()
+            // 这里额外登记 cleaningPaths：删除分片下载中的任务后立刻重加同名文件时，
+            // addTask 会看到路径仍被占用并递增序号，不再复用同一组 `.partN`（P1-04）。
+            launchCleanup(taskId, job, removed.savePath) {
                 try {
                     val file = removed.savePath.toFile()
                     cleanupParts(file)
@@ -530,9 +604,10 @@ class DownloadEngine(
         val task = taskMap[taskId] ?: return
         // 先登记 Job，保证 activeJobs.size 反映真实占用
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            // 上一个协程（暂停/取消的那个）可能还在写 `.offset`、关句柄：等它退出再接手，
-            // 否则两个协程同时写同一个 `.partN`，续传偏移与文件长度会错位
-            stoppingJobs.remove(taskId)?.let { previous ->
+            // 上一个协程（暂停/取消/删除的那个）可能还在写 `.offset`、关句柄、删 `.partN`：
+            // 等**全部**收尾协程退出再接手，否则两个协程同时写同一个 `.partN`，
+            // 续传偏移与文件长度会错位（P1-04：单值覆盖会漏掉旧 job）。
+            stoppingSnapshot(taskId).forEach { previous ->
                 runCatching { previous.join() }
             }
             downloadFile(taskId)
@@ -1855,7 +1930,12 @@ class DownloadEngine(
     }
 
     /**
-     * 关闭引擎：取消所有任务与协程作用域
+     * 关闭引擎：取消所有任务与协程作用域。
+     *
+     * ★ 顺序（P1-05）：先断开连接让阻塞中的 read() 退出，再**等待所有收尾清理协程跑完**，
+     * 最后才 cancel。1.0.3 直接 `scope.cancel()`，而清理协程也挂在 `scope` 上，
+     * 结果「取消任务 / 移除并删除文件后立刻关应用」时 `.partN` / `.offset` / `{name}.hls`
+     * 残留、`deleteFile=true` 的承诺落空。清理协程现已迁到独立的 [cleanupScope]。
      */
     override fun shutdown() {
         activeJobs.values.forEach { it.cancel() }
@@ -1867,6 +1947,13 @@ class DownloadEngine(
         taskProcesses.clear()
         taskFiles.values.flatten().forEach { closeQuietly(it, "DownloadEngine") }
         taskFiles.clear()
+        // 等收尾清理协程跑完：它们会 join 已取消的下载协程再删残片。带超时上限，
+        // 避免某个卡在 IO 的清理协程把退出流程无限期堵住；超时后由 cleanupScope.cancel() 兜底。
+        runBlocking {
+            withTimeoutOrNull(SHUTDOWN_CLEANUP_TIMEOUT_MS) {
+                pendingCleanups.toList().joinAll()
+            }
+        }
         // 退出前把任务写盘（节流协程即将被取消，这里同步落盘）
         persistJob?.cancel()
         synchronized(stateLock) {
@@ -1879,6 +1966,7 @@ class DownloadEngine(
         }
         if (taskPersistenceEnabled) TaskStore.save(taskMap.values.toList())
         scope.cancel()
+        cleanupScope.cancel()
         AppLogger.info("DownloadEngine", "下载引擎已关闭")
     }
 }
@@ -1892,3 +1980,10 @@ class DownloadEngine(
  */
 internal const val EMPTY_DOWNLOAD_MESSAGE =
     "没有下载到任何数据（服务器返回空内容或写入失败）：请检查链接是否有效，或重新解析后重试。"
+
+/**
+ * [DownloadEngine.shutdown] 等待收尾清理协程的上限（P1-05）。
+ * 正常清理（关句柄 + 删几个分片文件）在毫秒级；设 5s 是为了不让卡在不可中断 IO 的
+ * 极少数情况把整个退出流程堵死。超时后清理作用域会被 cancel，残片留到下次启动处理。
+ */
+private const val SHUTDOWN_CLEANUP_TIMEOUT_MS = 5_000L

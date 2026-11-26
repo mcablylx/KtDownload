@@ -25,8 +25,10 @@ import java.util.zip.ZipOutputStream
  * - `crash/`：启动时归档的 `hs_err_pid*.log` / `replay_pid*.log`；
  * - `manifest.txt`：本次打包了哪些文件、明确声明「不含网盘凭证」。
  *
- * **绝不打包**：`cloud-credentials.*` / `cloud-accounts.properties` / 任务存储里的
- * Cookie（本来就不落盘）。诊断包是要发给别人看的，凭证进包等于泄露账号。
+ * **绝不打包凭证文件**：`cloud-credentials.*` / `cloud-accounts.properties` / 任务存储里的
+ * Cookie（本来就不落盘）。但日志（`app-*.log` / `jcef.log`）会原样收进来：它们在
+ * [SensitiveTextRedactor] 落盘时已尽力脱敏，自由文本仍可能残留隐私，manifest 会如实提示
+ * 用户发送前审阅（P1-07）。
  */
 object DiagnosticBundle {
 
@@ -76,7 +78,14 @@ object DiagnosticBundle {
             recentLogs.forEach { appendLine("  logs/${it.fileName}") }
             crashLogs.forEach { appendLine("  crash/${it.fileName}") }
             appendLine()
-            appendLine("This bundle contains NO cloud-drive credentials, cookies or tokens.")
+            // P1-07：如实声明。1.0.3 写「不含任何 cookies/tokens」，但 app-*.log 与 jcef.log
+            // 是原样收进包的，日志里可能残留 URL 或自由文本里的敏感信息。现在日志在落盘前已
+            // 统一脱敏（SensitiveTextRedactor），但这不是绝对保证，必须提示用户发送前先审阅。
+            appendLine("NO cloud-drive credentials, cookies or token STORES are packaged:")
+            appendLine("  cloud-credentials.* and cloud-accounts.properties are explicitly excluded.")
+            appendLine("Application logs (app-*.log, jcef.log) are included. Sensitive fields and URL")
+            appendLine("query strings are redacted on a best-effort basis, but free-form messages may")
+            appendLine("still contain private data. Please review the logs before sharing this bundle.")
         }
 
         ZipOutputStream(Files.newOutputStream(target)).use { zip ->
@@ -181,8 +190,10 @@ object DiagnosticBundle {
 
     /** 家目录替换成 `~`：路径结构对排障有用，用户名没必要外泄 */
     internal fun redactHome(path: Path): String {
-        val home = System.getProperty("user.home").orEmpty()
-        val text = path.toString()
+        val home = System.getProperty("user.home").orEmpty().replace('\\', '/')
+        // 统一成正斜杠：Windows 的 Path.toString() 用反斜杠，会让「~/Downloads」这类
+        // 跨平台断言与快照对比失效（诊断包是纯文本，路径用 / 更稳定也更易读）。
+        val text = path.toString().replace('\\', '/')
         if (home.isNotBlank() && text.startsWith(home)) return "~" + text.removePrefix(home)
         return text
     }

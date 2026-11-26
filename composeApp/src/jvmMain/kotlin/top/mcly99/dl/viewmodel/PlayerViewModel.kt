@@ -27,6 +27,7 @@ import top.mcly99.dl.engine.player.VlcRuntime
 import top.mcly99.dl.engine.web.HttpProbe
 import top.mcly99.dl.engine.web.MediaCandidate
 import top.mcly99.dl.engine.web.MediaKind
+import top.mcly99.dl.engine.web.redactUrl
 import top.mcly99.dl.utils.AppLogger
 import java.net.Proxy
 
@@ -273,7 +274,7 @@ class PlayerViewModel(
                 probe.fetchTextWithUrl(request.url, request.referer, cookie = request.cookie)
             }
             if (probed == null) {
-                AppLogger.debug("PlayerViewModel", "主播放列表拉取失败，不给清晰度下拉: ${request.url}")
+                AppLogger.debug("PlayerViewModel", "主播放列表拉取失败，不给清晰度下拉: ${redactUrl(request.url)}")
                 return@launch
             }
             val options = withContext(Dispatchers.Default) {
@@ -283,7 +284,7 @@ class PlayerViewModel(
             // 期间可能已经切了档位或关了播放页：结果只对同一个 origin 生效
             if (origin?.url == request.url) {
                 qualities = options
-                AppLogger.debug("PlayerViewModel", "清晰度档位 ${options.size} 个: ${request.url}")
+                AppLogger.debug("PlayerViewModel", "清晰度档位 ${options.size} 个: ${redactUrl(request.url)}")
             }
         }
     }

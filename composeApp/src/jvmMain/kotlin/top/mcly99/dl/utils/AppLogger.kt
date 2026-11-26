@@ -141,14 +141,17 @@ private class DailyFileHandler(private val directory: Path) : Handler() {
         val timestamp = java.time.Instant.ofEpochMilli(record.millis)
             .atZone(java.time.ZoneId.systemDefault())
             .format(dateTimeFormatter)
-        val base = "$timestamp ${record.level.name.padEnd(7)} ${record.message}"
+        // P1-07：落盘前统一脱敏。日志会被诊断包原样收走，业务日志里常有带签名的完整 URL、
+        // 异常堆栈里也可能带 token；在这里兜底能保证以后新增的调用点也不会漏。
+        val message = SensitiveTextRedactor.redact(record.message.orEmpty())
+        val base = "$timestamp ${record.level.name.padEnd(7)} $message"
         val error = record.thrown ?: return base
         val stack = StringWriter()
         error.printStackTrace(PrintWriter(stack))
         return buildString {
             append(base)
             append('\n')
-            append(stack.toString().trimEnd())
+            append(SensitiveTextRedactor.redact(stack.toString().trimEnd()))
         }
     }
 

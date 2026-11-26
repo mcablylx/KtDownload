@@ -28,11 +28,13 @@ object DiagnosticLog {
     ) {
         if (!isEnabled()) return
         // Never persist query strings: signed share/CDN URLs carry tokens and cookies.
-        val safeUrl = url.substringBefore('?')
+        val safeUrl = SensitiveTextRedactor.redactUrl(url)
+        // 兜底：req/resp/error 可能来自拦截器之外的调用点，也可能是响应体或异常文本，
+        // 统一再脱敏一次（幂等），确保落盘前没有明文凭证 / 签名 URL（P1-07）。
         val suffix = buildString {
-            error?.let { append(" error=$it") }
-            requestBody?.let { append(" req=${it.take(512)}") }
-            responseBody?.let { append(" resp=${it.take(512)}") }
+            error?.let { append(" error=${SensitiveTextRedactor.redact(it.take(512))}") }
+            requestBody?.let { append(" req=${SensitiveTextRedactor.redact(it.take(512))}") }
+            responseBody?.let { append(" resp=${SensitiveTextRedactor.redact(it.take(512))}") }
         }
         AppLogger.debug(TAG, "$method $safeUrl -> $code (${costMs}ms)$suffix")
     }

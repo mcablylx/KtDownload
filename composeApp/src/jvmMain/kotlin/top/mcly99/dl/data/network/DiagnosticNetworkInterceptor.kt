@@ -9,6 +9,7 @@
 package top.mcly99.dl.data.network
 
 import top.mcly99.dl.utils.DiagnosticLog
+import top.mcly99.dl.utils.SensitiveTextRedactor
 import okhttp3.Interceptor
 import okhttp3.Response
 import okio.Buffer
@@ -41,9 +42,12 @@ class DiagnosticNetworkInterceptor : Interceptor {
             val response = chain.proceed(request)
             val cost = System.currentTimeMillis() - start
             val code = response.code
-            // ★ 只有非 200/206 才读响应体（peekBody 不消费原流，下载/大响应也安全）
+            // ★ 只有非 200/206 才读响应体（peekBody 不消费原流，下载/大响应也安全）。
+            // 响应体同样要脱敏：错误页可能原样回显请求里的 token / captcha / 签名 URL（P1-07）。
             val body = if (code != 200 && code != 206) {
-                runCatching { response.peekBody(BODY_LIMIT.toLong()).string() }.getOrNull()
+                runCatching { response.peekBody(BODY_LIMIT.toLong()).string() }
+                    .getOrNull()
+                    ?.let { redactSensitiveBody(it) }
             } else {
                 null
             }
@@ -57,14 +61,15 @@ class DiagnosticNetworkInterceptor : Interceptor {
             )
             response
         } catch (t: Throwable) {
-            // 异常路径（含 JSON 解析失败的上游）：把请求体带上，方便对着服务端复现
+            // 异常路径（含 JSON 解析失败的上游）：把请求体带上，方便对着服务端复现。
+            // e.message 常含完整 URL / token，必须脱敏后才落盘（P1-07）。
             DiagnosticLog.network(
                 method = request.method,
                 url = request.url.toString(),
                 code = -1,
                 costMs = System.currentTimeMillis() - start,
                 requestBody = captured,
-                error = t.message ?: t.javaClass.simpleName
+                error = SensitiveTextRedactor.redact(t.message ?: t.javaClass.simpleName)
             )
             throw t
         }
@@ -84,16 +89,13 @@ class DiagnosticNetworkInterceptor : Interceptor {
     }
 
     /**
-     * 把请求体里的敏感字段值替换为 `***`，覆盖 JSON 与 form-urlencoded 两种形态。
+     * 把文本里的敏感字段值替换为 `***`，并剥掉 URL 的 query/fragment。
      *
-     * 登录 body 常含明文 password / refresh_token / access_token；诊断模式日志会落盘，
-     * 不脱敏等于把用户凭证写进文件（P1-4）。命中字段名大小写不敏感。
+     * 覆盖 JSON 与 form-urlencoded 两种形态，键名用**模糊包含**匹配（大小写不敏感），
+     * 因此 `accessToken` / `captcha_token` / `refreshToken` 等 camelCase 变体也命中（P1-07）。
+     * 实际实现统一在 [SensitiveTextRedactor]，日志落盘处还会再兜底一次。
      */
-    internal fun redactSensitiveBody(text: String): String {
-        var out = JSON_SECRET.replace(text) { "${it.groupValues[1]}\"***\"" }
-        out = FORM_SECRET.replace(out) { "${it.groupValues[1]}***" }
-        return out
-    }
+    internal fun redactSensitiveBody(text: String): String = SensitiveTextRedactor.redact(text)
 
     /**
      * 把真实请求体复制一份到内存的包装体。
@@ -124,21 +126,5 @@ class DiagnosticNetworkInterceptor : Interceptor {
 
         /** 超过这个长度的请求体不复制内容（大文件上传场景） */
         const val MAX_CAPTURED_BODY = 64L * 1024
-
-        /** 需要在日志里脱敏的字段名（大小写不敏感，覆盖各网盘登录/刷新字段） */
-        private const val SECRET_KEYS =
-            "password|passwd|pwd|passcode|refresh_token|access_token|id_token|client_secret|secret|token|api_?key|authorization|bdstoken|stoken|session|sekey"
-
-        /** JSON 形态："password":"xxx" / "token":123 */
-        private val JSON_SECRET = Regex(
-            """("(?:$SECRET_KEYS)"\s*:\s*)("(?:[^"\\]|\\.)*"|[\w.+/-]+)""",
-            RegexOption.IGNORE_CASE,
-        )
-
-        /** form-urlencoded 形态：password=xxx（保留 &/? 分隔符，避免把参数粘连） */
-        private val FORM_SECRET = Regex(
-            """((?:^|[&?])(?:$SECRET_KEYS)=)([^&]*)""",
-            RegexOption.IGNORE_CASE,
-        )
     }
 }

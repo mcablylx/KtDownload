@@ -83,7 +83,10 @@ class DiagnosticBundleTest {
             zip.getInputStream(zip.getEntry("manifest.txt")).bufferedReader().readText()
         }
         assertTrue(manifest.contains("QUARK=2"))
-        assertTrue(manifest.contains("NO cloud-drive credentials"))
+        assertTrue(manifest.contains("NO cloud-drive credentials"), "凭证文件仍应明确排除")
+        // P1-07：声明必须与实现相符——日志确实会进包，要如实提示审阅
+        assertTrue(manifest.contains("Application logs"), "manifest 必须说明日志会随包分发")
+        assertTrue(manifest.contains("review the logs before sharing"), "manifest 必须提示发送前审阅")
     }
 
     @Test

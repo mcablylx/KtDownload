@@ -78,26 +78,15 @@ object XunleiWebCredential {
      * 网页版 captcha 签名参数：本地算 captcha_sign → 直接换 token。
      *
      * ⚠️ 与 App 通道**不是一套**：网页端 client_version 会被强制更新、9 条盐随 bundle 轮换
-     * （约 20 天一次）。签名一旦被服务端拒绝，就只能回退网页会话
-     * （见 `XunleiAccountRepository.refreshWebSession`）。替换时版本与盐必须整组更新，盐顺序敏感。
+     * （约 20 天一次）。1.0.3 把它们写死在这里，轮换即全平台阻断、只能发版；现在参数统一由
+     * [XunleiWebSignConfig] 提供（内置快照 + 运行时可覆盖/可下发），见
+     * `data/network/XunleiWebSignConfig.kt`。替换时版本与盐必须整组更新，盐顺序敏感。
      */
-    const val WEB_CLIENT_VERSION = "1.93.10"
+    /** 内置默认版本号，仅供文档/兼容引用；实际请求一律取 [XunleiWebSignConfig.current]。 */
+    const val WEB_CLIENT_VERSION = WebSignConfig.DEFAULT_CLIENT_VERSION
     const val WEB_PACKAGE_NAME = "pan.xunlei.com"
     private const val WEB_SIGN_HOST = "pan.xunlei.com"
     private const val WEB_ALG_VERSION = "1"
-
-    /** 9 条盐，顺序敏感（来自网页版 public-key 链） */
-    private val WEB_CAPTCHA_SALTS = listOf(
-        "DVM8BRQfJWDsIE0JbH5GCUM0z0jU1yGymBTj4Eyloazv1F+w0G7ig",
-        "T",
-        "a1fUxfjOO1/dW++DpGupRgw9P93L",
-        "aktKbp+/lQc3MvlMHIupt65LjAgJOL6ttMFvTKK+7+WKubSf9rT",
-        "SB/ne9FQUnQmWz4Wuv9KqKfGOBOCUubpHpECxOHfD4hNoMclYA2Yq",
-        "sOZFBQ8IMFy3OFjAIf/eA65iqFvS9TIKzLyrhiT6",
-        "ZhJdLgL7MGh2GanboB0yk",
-        "Osf",
-        "v"
-    )
 
     /** 网页 captcha_token 的保守有效期：服务端 expires_in=300s，页面本身再提前 30s 视为过期 */
     const val WEB_CAPTCHA_TOKEN_TTL_MS = 270_000L
@@ -108,10 +97,18 @@ object XunleiWebCredential {
      *
      * 与 App 通道的区别：App 是 10 层、raw 里放 package_name；网页是 9 层、raw 里放 host。
      * 用 App 签名去换网页 token 会被服务端判 `client_id not match`（就是「验证码无效」的根因）。
+     *
+     * [config] 默认固定为内置快照（保持纯函数、可复现的基准签名）；实际请求由
+     * [XunleiApi.initWebCaptcha] 显式传 [XunleiWebSignConfig.current]，因此盐/版本轮换后
+     * 运行时下发一次即可恢复，无需重新打包。
      */
-    fun computeCaptchaSign(deviceId: String, timestampMs: Long): String {
-        var h = CLIENT_ID + WEB_CLIENT_VERSION + WEB_SIGN_HOST + deviceId + timestampMs
-        WEB_CAPTCHA_SALTS.forEach { salt -> h = md5Hex(h + salt) }
+    fun computeCaptchaSign(
+        deviceId: String,
+        timestampMs: Long,
+        config: WebSignConfig = WebSignConfig.DEFAULT,
+    ): String {
+        var h = CLIENT_ID + config.clientVersion + WEB_SIGN_HOST + deviceId + timestampMs
+        config.salts.forEach { salt -> h = md5Hex(h + salt) }
         return "$WEB_ALG_VERSION.$h"
     }
 
