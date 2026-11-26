@@ -103,7 +103,7 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 - 每条结果记住来源页面地址，下载时作为 `Referer` 贯穿探测、分块与 HLS 分片请求。
 - 可选“探测文件大小”：按 4 并发 HEAD / Range 获取体积；可选“深度抓取”：用本机 Chrome / Edge 经 CDP 监听真实网络请求，拿到运行时签名地址与当次会话 Cookie。
 - 深度抓取的会话 Cookie 不写磁盘；任务重启后提示重新抓取，而不是发起注定失败的请求。
-- 身份头按来源区分：抓网页任务使用浏览器 UA，手动添加任务自报 `KtDownload/<版本号>`（取自 `appVersion`）；跳转不同 host 时不携带 Cookie。
+- 身份头按来源区分：抓网页任务使用浏览器 UA，手动添加任务自报 `KtDownload/1.0.1`；跳转不同 host 时不携带 Cookie。
 
 ### 在线观看
 
@@ -120,8 +120,6 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 - 统一页面覆盖 10 个网盘平台：夸克、UC、迅雷、百度网盘、中国移动 139、123 云盘、115、光鸭、蓝奏优享、蓝奏云；GitHub 作为代码仓库入口单独处理。
 - 支持登录状态展示、加密多账号池、主账号切换与按文件轮换账号取链。
 - 应用内嵌 JCEF 浏览器完成平台登录，不调用系统浏览器；登录完成后左侧列表与右侧内容同步刷新。
-- 读取失败时红字下方提供“去网页重新登录”，直接进入该平台的应用内登录页，不必退回云盘卡片重找平台。
-- 迅雷凭证的设备号缺失或与验证码不同源时自动补齐/重签，不需要为了“请求参数错误”反复退出重登。
 - 文件管理支持：浏览目录、新建文件夹、重命名、移动、删除、创建分享、按平台有效期档位分享、转存他人分享链接、下载文件与查看容量。
 - 每个平台按能力位显示按钮：不支持的操作直接隐藏，而不是点击后再报错。
 - 网盘文件优先使用文件列表中的真实大小，避免取链接口占位值把任务总大小压成几 KB；容量在删除、转存、新建文件夹后自动刷新。
@@ -212,11 +210,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 单个包也可通过 `KTDOWNLOAD_FFMPEG_ZIP` 环境变量单独指定。若需更新 FFmpeg 版本，必须同时更新脚本里的 `$AssetName`、`$ExpectedSha256` 以及 `third-party/ffmpeg/SOURCE.txt`。
 
 macOS 打包需在本机用 `scripts/fetch-ffmpeg-macos.sh` 编译 FFmpeg 并完成 ad-hoc 签名。
-
-> **release 构建关闭了代码裁剪（ProGuard / R8 shrink）**，见 `composeApp/build.gradle.kts` 的 `buildTypes.release.proguard`。
-> JCEF、vlcj、JNA 等原生桥接库靠**类名字符串反射**实例化回调类，静态分析看不到引用；一旦裁剪，
-> IDE 里运行正常、安装包却会出现内嵌浏览器白屏、`ClassNotFoundException` / `VerifyError` 等只在打包版复现的问题。
-> `composeApp/proguard-rules.pro` 已写好重新启用裁剪所需的 keep 规则，但要恢复需逐项实机验证反射入口。
 
 ### 离线打包（无需下载 FFmpeg / libvlc）
 
@@ -358,7 +351,6 @@ KtDownload/
 9. 搜索为内存包含匹配，不支持正则。
 10. 内置二维码编码器仅支持字节模式、纠错等级 M、版本 1~10，约 270 字节以内。
 11. Windows 原生 toast 进度通知未启用，当前使用托盘气泡。
-12. 安装包约 345 MB：release 关闭代码裁剪以保住原生桥接库，`material-icons-extended` 目前也是全量（约 37 MB）；若要瘦身需先逐项验证反射入口。
 
 ---
 
