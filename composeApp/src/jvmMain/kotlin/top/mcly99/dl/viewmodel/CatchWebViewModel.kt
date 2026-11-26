@@ -87,6 +87,9 @@ enum class CatchWebNotice {
  * @param deepCatchEnabled 设置项：是否启用深度抓取
  * @param scope 协程作用域；测试注入可控调度器
  * @param ioDispatcher 阻塞 IO 用的调度器；测试注入可控调度器
+ * @param extractDispatcher CPU 密集的 HTML 解析用的调度器。默认 `Dispatchers.Default`，
+ *   与 IO 分开是为了「解析几十个视频标签」不占满 IO 线程。测试里也换成测试调度器，
+ *   否则抓取完成时机对 `advanceUntilIdle()` 不可见，只能靠 sleep 轮询。
  */
 class CatchWebViewModel(
     proxyProvider: () -> java.net.Proxy? = { null },
@@ -97,6 +100,7 @@ class CatchWebViewModel(
     private val deepCatchEnabled: () -> Boolean = { false },
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob()),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val extractDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
     /** 顶栏输入框的内容；单一真源，HeaderBar 不自己 remember 一份 */
     var url by mutableStateOf("")
@@ -157,7 +161,7 @@ class CatchWebViewModel(
         job = scope.launch {
             try {
                 val page = withContext(ioDispatcher) { fetcher.fetch(input) }
-                val results = withContext(Dispatchers.Default) {
+                val results = withContext(extractDispatcher) {
                     HtmlMediaExtractor.extract(page.html, page.finalUrl)
                 }
                 // 主页面结果先出：iframe 最坏要等几十秒，已经拿到的结果不该陪跑

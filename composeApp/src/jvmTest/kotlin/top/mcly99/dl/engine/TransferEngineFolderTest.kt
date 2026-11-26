@@ -1,8 +1,9 @@
 package top.mcly99.dl.engine
 
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import top.mcly99.dl.model.NetworkDevice
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitUntilSuspend
 import java.io.File
 import java.net.ServerSocket
 import java.nio.file.Files
@@ -45,8 +46,9 @@ class TransferEngineFolderTest {
             }
             val sender = TransferEngine(port)
             try {
-                val deadline = System.currentTimeMillis() + 3_000
-                while (!receiver.fileServerRunning && System.currentTimeMillis() < deadline) delay(20)
+                awaitUntilSuspend(TestTimeouts.SHORT, describe = { "接收服务未能启动" }) {
+                    receiver.fileServerRunning
+                }
                 assertTrue(receiver.fileServerRunning, "接收服务未能启动")
 
                 val files = sender.collectFolderFiles(source)
@@ -60,11 +62,10 @@ class TransferEngineFolderTest {
                     File(receive, "${source.name}/sub/b.txt") to "world",
                     File(receive, "${source.name}/sub/中文.txt") to "你好",
                 )
-                val receiveDeadline = System.currentTimeMillis() + 5_000
-                while (expected.any { (f, text) -> !f.isFile || f.readText() != text } &&
-                    System.currentTimeMillis() < receiveDeadline
-                ) {
-                    delay(20)
+                awaitUntilSuspend(TestTimeouts.MEDIUM, describe = {
+                    "文件未按目录结构送达: ${expected.filter { (f, text) -> !f.isFile || f.readText() != text }.map { it.first.path }}"
+                }) {
+                    expected.all { (f, text) -> f.isFile && f.readText() == text }
                 }
                 expected.forEach { (file, text) ->
                     assertTrue(file.isFile, "缺少文件: ${file.path}")
@@ -72,8 +73,9 @@ class TransferEngineFolderTest {
                 }
 
                 // P1-1：接收回调带上发送方 IP，ViewModel 依赖它创建接收任务
-                val callbackDeadline = System.currentTimeMillis() + 3_000
-                while (received.size < 3 && System.currentTimeMillis() < callbackDeadline) delay(20)
+                awaitUntilSuspend(TestTimeouts.SHORT, describe = { "接收回调只收到 ${received.size}/3 条" }) {
+                    received.size >= 3
+                }
                 assertEquals(
                     setOf("a.txt", "b.txt", "中文.txt"),
                     received.map { it.first }.toSet(),

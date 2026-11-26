@@ -2,11 +2,12 @@ package top.mcly99.dl.engine
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import top.mcly99.dl.model.DownloadStatus
 import top.mcly99.dl.model.DownloadTask
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitElement
+import top.mcly99.dl.testutil.isTerminal
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -81,14 +82,8 @@ class DownloadEngineChunkPlanTest {
     }
 
     private fun awaitTerminal(id: String): DownloadTask = runBlocking {
-        withTimeout(30_000L) {
-            engine.taskState.first { tasks ->
-                tasks.any {
-                    it.id == id && it.status in setOf(
-                        DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED,
-                    )
-                }
-            }.first { it.id == id }
+        engine.taskState.awaitElement(TestTimeouts.LONG, { "任务 $id 未在超时前进入终态" }) {
+            it.id == id && it.status.isTerminal
         }
     }
 

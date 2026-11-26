@@ -3,12 +3,14 @@ package top.mcly99.dl.viewmodel
 import androidx.compose.runtime.*
 import kotlinx.coroutines.*
 import top.mcly99.dl.engine.TransferEngine
+import top.mcly99.dl.engine.WebPortOutcome
 import top.mcly99.dl.engine.WebUploadServer
 import top.mcly99.dl.model.NetworkDevice
 import top.mcly99.dl.model.TransferDirection
 import top.mcly99.dl.model.TransferStatus
 import top.mcly99.dl.model.TransferTask
 import top.mcly99.dl.model.keepingUnfinished
+import top.mcly99.dl.model.trimmedTo
 import top.mcly99.dl.theme.UiStrings
 import top.mcly99.dl.theme.zhCN
 import top.mcly99.dl.utils.AppConstants
@@ -244,24 +246,22 @@ class TransferViewModel {
         ioScope.launch {
             val ok = webServer.start(port)
             // 失败时回滚到「实际在监听的端口」，别让「设备发现」继续广播一个没人监听的端口
-            val activePort = webServer.port
-            engine.advertisedWebPort = activePort
+            val outcome = WebPortOutcome.resolve(
+                requestedPort = port,
+                started = ok,
+                activePort = webServer.port,
+                running = webServer.isRunning,
+            )
+            engine.advertisedWebPort = outcome.activePort
             scope.launch {
-                webServerRunning = webServer.isRunning
-                webServerError = !ok
-                webServerPort = activePort
-                webServerUrl = if (webServer.isRunning) webServer.accessUrl() else ""
-                if (!ok) {
-                    if (webServer.isRunning) {
-                        AppLogger.warn(
-                            "TransferViewModel",
-                            "端口 $port 启动失败，服务继续在旧端口 $activePort 运行",
-                        )
-                    } else {
-                        AppLogger.warn("TransferViewModel", "Web 服务启动失败，端口 $port")
-                    }
+                webServerRunning = outcome.available
+                webServerError = outcome.failed
+                webServerPort = outcome.activePort
+                webServerUrl = if (outcome.available) webServer.accessUrl() else ""
+                if (outcome.failed) {
+                    AppLogger.warn("TransferViewModel", outcome.describe())
                 } else {
-                    AppLogger.info("TransferViewModel", "Web 服务已启动，端口 $activePort")
+                    AppLogger.info("TransferViewModel", outcome.describe())
                 }
             }
         }
@@ -399,20 +399,7 @@ class TransferViewModel {
      * 列表复制变贵。这里只裁剪**已结束**的记录，进行中的任务永远保留。
      */
     private fun appendTask(task: TransferTask) {
-        val next = transferTasks + task
-        if (next.size <= MAX_TRANSFER_HISTORY) {
-            transferTasks = next
-            return
-        }
-        val overflow = next.size - MAX_TRANSFER_HISTORY
-        val dropped = HashSet<String>(overflow * 2)
-        for (candidate in next) {
-            if (dropped.size >= overflow) break
-            if (candidate.status != TransferStatus.WAITING && candidate.status != TransferStatus.TRANSFERRING) {
-                dropped.add(candidate.id)
-            }
-        }
-        transferTasks = if (dropped.isEmpty()) next else next.filterNot { it.id in dropped }
+        transferTasks = (transferTasks + task).trimmedTo(MAX_TRANSFER_HISTORY)
     }
 
     /**

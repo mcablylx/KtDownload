@@ -5,6 +5,8 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.URL
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitUntil
 import java.nio.file.Files
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -296,11 +298,10 @@ class WebUploadServerTest {
         }
     }
 
-    /** 等「处理器线程删掉半成品文件」这一步完成（最多 3 秒） */
+    /** 等「处理器线程删掉半成品文件」这一步完成 */
     private fun awaitNoSavedFiles() {
-        val deadline = System.currentTimeMillis() + 3_000
-        while (System.currentTimeMillis() < deadline && savedFiles().isNotEmpty()) {
-            Thread.sleep(50)
+        awaitUntil(TestTimeouts.SHORT, intervalMs = 50, describe = { "半成品文件未被删除: ${savedFiles()}" }) {
+            savedFiles().isEmpty()
         }
     }
 

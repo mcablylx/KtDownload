@@ -87,3 +87,27 @@ val TransferTask.isFinished: Boolean
  * 进行中也一并清掉）不会崩，只会让用户丢失刚刚失败、准备重试的记录。
  */
 fun List<TransferTask>.keepingUnfinished(): List<TransferTask> = filter { !it.isFinished }
+
+/**
+ * 把传输历史裁剪到 [limit] 条，**优先丢最早结束的记录**。
+ *
+ * 从前往后扫（列表是旧 → 新），只把已结束的记入丢弃集，凑够超出量就停：
+ * 这样新近完成、用户还想看的记录留下，最老的那批先走。
+ *
+ * 进行中的任务一条都不丢 —— 哪怕因此仍然超限。它们是正在动的任务，
+ * 从列表里消失会让用户以为传输被中断了；等它们结束，下一轮 append 会自然回收。
+ *
+ * 抽成纯函数的原因和 [keepingUnfinished] 一样：ViewModel 构造就会起 UDP 发现，
+ * 单测没法只验证裁剪规则。
+ */
+fun List<TransferTask>.trimmedTo(limit: Int): List<TransferTask> {
+    require(limit >= 0) { "limit 不能为负: $limit" }
+    if (size <= limit) return this
+    val overflow = size - limit
+    val dropped = HashSet<String>(overflow * 2)
+    for (task in this) {
+        if (dropped.size >= overflow) break
+        if (task.isFinished) dropped.add(task.id)
+    }
+    return if (dropped.isEmpty()) this else filterNot { it.id in dropped }
+}

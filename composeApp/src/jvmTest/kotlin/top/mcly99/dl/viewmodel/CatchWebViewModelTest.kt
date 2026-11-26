@@ -21,7 +21,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
-import kotlin.test.fail
 
 /**
  * [CatchWebViewModel] 状态机单测。
@@ -59,7 +58,7 @@ class CatchWebViewModelTest {
         val vm = viewModel()
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         val results = assertIs<CatchWebState.Success>(vm.state).results
         assertEquals(2, results.size)
@@ -87,7 +86,7 @@ class CatchWebViewModelTest {
         val vm = viewModel(sizeProbe = probe)
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         val results = assertIs<CatchWebState.Success>(vm.state).results
         assertEquals(2, results.size)
@@ -101,7 +100,7 @@ class CatchWebViewModelTest {
         val vm = viewModel()
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         val results = assertIs<CatchWebState.Success>(vm.state).results
         val first = results.first()
@@ -119,7 +118,7 @@ class CatchWebViewModelTest {
         val vm = viewModel()
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         assertIs<CatchWebState.Success>(vm.state).results.forEach { vm.removeCandidate(it.url) }
         // 删光后回到「没找到」，而不是留一个空列表的 Success（后者会让「全部下载」按钮孤立出现）
@@ -131,7 +130,7 @@ class CatchWebViewModelTest {
         val vm = viewModel()
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         val before = assertIs<CatchWebState.Success>(vm.state).results
         vm.removeCandidate("https://cdn.example.com/v/not-there.mp4")
@@ -158,7 +157,7 @@ class CatchWebViewModelTest {
         )
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         val results = assertIs<CatchWebState.Success>(vm.state).results
         // 静态 2 条 + 拦截 1 条，且 m3u8 排在最前（按 kind 排序）
@@ -177,7 +176,7 @@ class CatchWebViewModelTest {
         )
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         // 降级不是失败：静态结果照常展示，只多一条提示
         assertEquals(2, assertIs<CatchWebState.Success>(vm.state).results.size)
@@ -196,7 +195,7 @@ class CatchWebViewModelTest {
         val vm = viewModel(capture = capture, deepCatch = false)
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         assertEquals(0, capture.calls)
         assertEquals(2, assertIs<CatchWebState.Success>(vm.state).results.size)
@@ -209,7 +208,7 @@ class CatchWebViewModelTest {
         val vm = viewModel(capture = ThrowingCapture(), deepCatch = true)
         vm.updateUrl(pageUrl)
         vm.fetch()
-        awaitFetched(vm)
+        advanceUntilIdle()
 
         // 静态抓到的两条照常展示，深度抓取只降级成一条提示
         assertEquals(2, assertIs<CatchWebState.Success>(vm.state).results.size)
@@ -217,22 +216,6 @@ class CatchWebViewModelTest {
     }
 
     // ---------------------------------------------------------------- 辅助
-
-    /**
-     * 等抓取真正结束。
-     *
-     * 提取在 `Dispatchers.Default` 上跑（真实线程池），测试调度器看不到它；
-     * 只能「推进调度器 → 稍等 → 再推进」直到状态离开 Loading。
-     */
-    private fun TestScope.awaitFetched(vm: CatchWebViewModel) {
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            advanceUntilIdle()
-            if (vm.state !is CatchWebState.Loading) return
-            Thread.sleep(5)
-        }
-        fail("抓取没有在 5 秒内结束：${vm.state}")
-    }
 
     private fun TestScope.viewModel(
         sizeProbe: MediaSizeProbe = MediaSizeProbe(),
@@ -248,6 +231,9 @@ class CatchWebViewModelTest {
             deepCatchEnabled = { deepCatch },
             scope = CoroutineScope(dispatcher + SupervisorJob()),
             ioDispatcher = dispatcher,
+            // 提取也走测试调度器：否则 `advanceUntilIdle()` 看不到解析完成，
+            // 又得退回 sleep 轮询（T7：这个文件原先是唯一靠 Thread.sleep 兜底的）
+            extractDispatcher = dispatcher,
         )
     }
 

@@ -180,16 +180,15 @@ class DownloadViewModel {
      */
     fun requestRemoveTask(taskId: String) {
         val task = engine.getTask(taskId) ?: return
-        if (task.status != DownloadStatus.COMPLETED) {
-            engine.removeTask(taskId, deleteFile = true)
-            return
+        // 只在「已完成」时才查磁盘：未完成的任务不管文件在不在都由 RemoveDecision 直接连残片清掉，
+        // 省掉一次无意义的 stat（任务多时这里是 UI 线程上的串行调用）
+        val fileExists = task.status == DownloadStatus.COMPLETED &&
+            runCatching { task.savePath.toFile().exists() }.getOrDefault(false)
+        when (val decision = RemoveDecision.of(task.status, fileExists)) {
+            RemoveDecision.None -> Unit
+            is RemoveDecision.RemoveNow -> engine.removeTask(taskId, deleteFile = decision.deleteFile)
+            RemoveDecision.AskUser -> pendingRemove = task
         }
-        val fileExists = runCatching { task.savePath.toFile().exists() }.getOrDefault(false)
-        if (!fileExists) {
-            engine.removeTask(taskId, deleteFile = false)
-            return
-        }
-        pendingRemove = task
     }
 
     fun cancelPendingRemove() {

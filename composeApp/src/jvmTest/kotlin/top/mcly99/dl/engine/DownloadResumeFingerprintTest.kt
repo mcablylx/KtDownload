@@ -2,10 +2,12 @@ package top.mcly99.dl.engine
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import top.mcly99.dl.model.DownloadStatus
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitElement
+import top.mcly99.dl.testutil.awaitUntil
+import top.mcly99.dl.testutil.isTerminal
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -171,63 +173,41 @@ class DownloadResumeFingerprintTest {
     }
 
     /** 等到「下载中且已经有字节落盘、但还没下完」，这时暂停才有残片可续 */
-    private fun awaitPartialProgress(id: String, timeoutMs: Long = 20_000L) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+    private fun awaitPartialProgress(id: String, timeoutMs: Long = TestTimeouts.SLOW) {
+        awaitUntil(timeoutMs, intervalMs = 10, describe = { "等不到中途进度，测试无法在下载过程中暂停" }) {
             val task = engine.getTask(id)
-            if (task != null && task.downloadedSize > 0 && task.status == DownloadStatus.DOWNLOADING) return
-            Thread.sleep(10)
+            task != null && task.downloadedSize > 0 && task.status == DownloadStatus.DOWNLOADING
         }
-        error("等不到中途进度，测试无法在下载过程中暂停")
     }
 
-    private fun awaitPartialProgressIn(targetEngine: DownloadEngine, id: String, timeoutMs: Long = 20_000L) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+    private fun awaitPartialProgressIn(targetEngine: DownloadEngine, id: String, timeoutMs: Long = TestTimeouts.SLOW) {
+        awaitUntil(timeoutMs, intervalMs = 10, describe = { "等不到单线程的中途进度" }) {
             val task = targetEngine.getTask(id)
-            if (task != null && task.downloadedSize > 0 && task.status == DownloadStatus.DOWNLOADING) return
-            Thread.sleep(10)
+            task != null && task.downloadedSize > 0 && task.status == DownloadStatus.DOWNLOADING
         }
-        error("等不到单线程的中途进度")
     }
 
     private fun awaitStatus(id: String, status: DownloadStatus) = runBlocking {
-        withTimeout(15_000L) {
-            engine.taskState.first { tasks -> tasks.any { it.id == id && it.status == status } }
+        engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未在超时前变为 $status" }) {
+            it.id == id && it.status == status
         }
     }
 
     private fun awaitStatusIn(targetEngine: DownloadEngine, id: String, status: DownloadStatus) = runBlocking {
-        withTimeout(15_000L) {
-            targetEngine.taskState.first { tasks -> tasks.any { it.id == id && it.status == status } }
+        targetEngine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未在超时前变为 $status" }) {
+            it.id == id && it.status == status
         }
     }
 
     private fun awaitTerminal(id: String) = runBlocking {
-        withTimeout(60_000L) {
-            engine.taskState.first { tasks ->
-                tasks.any {
-                    it.id == id && it.status in setOf(
-                        DownloadStatus.COMPLETED,
-                        DownloadStatus.FAILED,
-                        DownloadStatus.CANCELLED,
-                    )
-                }
-            }.first { it.id == id }
+        engine.taskState.awaitElement(TestTimeouts.SLOW, { "任务 $id 未在超时前进入终态" }) {
+            it.id == id && it.status.isTerminal
         }
     }
 
     private fun awaitTerminalIn(targetEngine: DownloadEngine, id: String) = runBlocking {
-        withTimeout(60_000L) {
-            targetEngine.taskState.first { tasks ->
-                tasks.any {
-                    it.id == id && it.status in setOf(
-                        DownloadStatus.COMPLETED,
-                        DownloadStatus.FAILED,
-                        DownloadStatus.CANCELLED,
-                    )
-                }
-            }.first { it.id == id }
+        targetEngine.taskState.awaitElement(TestTimeouts.SLOW, { "任务 $id 未在超时前进入终态" }) {
+            it.id == id && it.status.isTerminal
         }
     }
 

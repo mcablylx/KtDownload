@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitUntil
 import java.io.File
 import java.nio.file.Files
 
@@ -46,11 +48,10 @@ class JcefHolderTest {
         if (System.getenv("MCLY_JCEF_SMOKE") != "1") return
         assertTrue(JcefHolder.hasLocalKernel(), "冒烟测试要求内核已在本地")
         JcefHolder.initInBackground(allowDownload = false)
-        val deadline = System.currentTimeMillis() + 180_000
-        while (System.currentTimeMillis() < deadline &&
-            !JcefHolder.browserReady && JcefHolder.initFailure == null
-        ) {
-            Thread.sleep(500)
+        awaitUntil(TestTimeouts.BROWSER, intervalMs = 500, describe = {
+            "JCEF 在 ${TestTimeouts.BROWSER}ms 内没有就绪（failure=${JcefHolder.initFailure}）"
+        }) {
+            JcefHolder.browserReady || JcefHolder.initFailure != null
         }
         assertNull(JcefHolder.initFailure, "JCEF 初始化失败：${JcefHolder.initFailure}")
         assertTrue(JcefHolder.browserReady, "JCEF 在 180s 内没有就绪")

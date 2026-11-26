@@ -2,13 +2,14 @@ package top.mcly99.dl.engine
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import top.mcly99.dl.model.DownloadStatus
 import top.mcly99.dl.model.DownloadTask
 import top.mcly99.dl.model.TaskType
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitElement
+import top.mcly99.dl.testutil.awaitUntilSuspend
+import top.mcly99.dl.testutil.isTerminal
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -422,18 +423,14 @@ class DownloadEngineIntegrationTest {
             )
 
             runBlocking {
-                withTimeout(20_000L) {
-                    singleThreadEngine.taskState.first { tasks ->
-                        tasks.any { it.id == id && it.downloadedSize > 0 }
-                    }
+                singleThreadEngine.taskState.awaitElement(TestTimeouts.SLOW, { "任务 $id 未开始写入数据" }) {
+                    it.id == id && it.downloadedSize > 0
                 }
             }
             singleThreadEngine.pauseDownload(id)
             val paused = runBlocking {
-                withTimeout(10_000L) {
-                    singleThreadEngine.taskState.first { tasks ->
-                        tasks.any { it.id == id && it.status == DownloadStatus.PAUSED }
-                    }.first { it.id == id }
+                singleThreadEngine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未进入暂停态" }) {
+                    it.id == id && it.status == DownloadStatus.PAUSED
                 }
             }
             assertTrue(
@@ -443,16 +440,8 @@ class DownloadEngineIntegrationTest {
 
             singleThreadEngine.startDownload(id)
             val task = runBlocking {
-                withTimeout(30_000L) {
-                    singleThreadEngine.taskState.first { tasks ->
-                        tasks.any {
-                            it.id == id && it.status in setOf(
-                                DownloadStatus.COMPLETED,
-                                DownloadStatus.FAILED,
-                                DownloadStatus.CANCELLED,
-                            )
-                        }
-                    }.first { it.id == id }
+                singleThreadEngine.taskState.awaitElement(TestTimeouts.LONG, { "续传任务 $id 未在超时前结束" }) {
+                    it.id == id && it.status.isTerminal
                 }
             }
 
@@ -483,17 +472,15 @@ class DownloadEngineIntegrationTest {
             threads = 2,
         )
         runBlocking {
-            withTimeout(20_000L) {
-                engine.taskState.first { tasks -> tasks.any { it.id == id && it.downloadedSize > 0 } }
+            engine.taskState.awaitElement(TestTimeouts.SLOW, { "任务 $id 未开始写入数据" }) {
+                it.id == id && it.downloadedSize > 0
             }
         }
 
         engine.pauseDownload(id)
         runBlocking {
-            withTimeout(10_000L) {
-                engine.taskState.first { tasks ->
-                    tasks.any { it.id == id && it.status == DownloadStatus.PAUSED }
-                }
+            engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未进入暂停态" }) {
+                it.id == id && it.status == DownloadStatus.PAUSED
             }
         }
 
@@ -602,10 +589,8 @@ class DownloadEngineIntegrationTest {
             threads = 2,
         )
         runBlocking {
-            withTimeout(10_000L) {
-                engine.taskState.first { tasks ->
-                    tasks.any { it.id == runningId && it.status == DownloadStatus.DOWNLOADING }
-                }
+            engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $runningId 未开始下载" }) {
+                it.id == runningId && it.status == DownloadStatus.DOWNLOADING
             }
         }
 
@@ -620,8 +605,10 @@ class DownloadEngineIntegrationTest {
 
         // 进行中的任务被中断后，`.part*` / `.offset` 必须清干净（同 removeTask 的竞态保护）
         runBlocking {
-            withTimeout(5_000L) {
-                while (tempDir.listFiles()?.any { it.name.startsWith("running.bin") } == true) delay(50)
+            awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = {
+                "running.bin 的临时文件未清理: ${tempDir.listFiles()?.map { it.name }}"
+            }) {
+                tempDir.listFiles()?.none { it.name.startsWith("running.bin") } == true
             }
         }
         val leftovers = tempDir.listFiles()?.filter { it.name.startsWith("running.bin") }.orEmpty()
@@ -637,24 +624,19 @@ class DownloadEngineIntegrationTest {
             threads = 1,
         )
         runBlocking {
-            withTimeout(10_000L) {
-                engine.taskState.first { tasks ->
-                    tasks.any { it.id == id && it.status == DownloadStatus.DOWNLOADING }
-                }
-                val deadline = System.currentTimeMillis() + 5_000
-                while ((!target.exists() || target.length() == 0L) &&
-                    System.currentTimeMillis() < deadline
-                ) {
-                    delay(20)
-                }
+            engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未开始下载" }) {
+                it.id == id && it.status == DownloadStatus.DOWNLOADING
+            }
+            awaitUntilSuspend(TestTimeouts.MEDIUM, describe = { "取消前应已写入部分数据，实际 ${target.length()}B" }) {
+                target.exists() && target.length() > 0L
             }
         }
         assertTrue(target.exists() && target.length() > 0L, "取消前应已写入部分数据")
 
         engine.cancelDownload(id)
         runBlocking {
-            withTimeout(5_000L) {
-                while (target.exists()) delay(20)
+            awaitUntilSuspend(TestTimeouts.MEDIUM, describe = { "取消后文件未被删除: $target" }) {
+                !target.exists()
             }
         }
 
@@ -671,18 +653,20 @@ class DownloadEngineIntegrationTest {
         )
         // 先等分块真的把 `.offset` 写出来（OFFSET_FLUSH_MS = 1s），否则测不到「删完又被回写」这个竞态
         runBlocking {
-            withTimeout(10_000L) {
-                while (tempDir.listFiles()?.any { it.name.endsWith(".offset") } != true) delay(50)
+            awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = { "分块未写出 .offset 文件" }) {
+                tempDir.listFiles()?.any { it.name.endsWith(".offset") } == true
             }
         }
 
         // 显式删文件：引擎默认 `deleteFile=false`（P0-1），这个用例要覆盖「删文件时的收尾」
         engine.removeTask(id, deleteFile = true)
 
-        // 清理现在是「等协程退出再删」的异步流程，给 5 秒窗口
+        // 清理现在是「等协程退出再删」的异步流程，给足窗口
         runBlocking {
-            withTimeout(5_000L) {
-                while (tempDir.listFiles()?.any { it.name.startsWith("removing.bin") } == true) delay(50)
+            awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = {
+                "removing.bin 的临时文件未清理: ${tempDir.listFiles()?.map { it.name }}"
+            }) {
+                tempDir.listFiles()?.none { it.name.startsWith("removing.bin") } == true
             }
         }
         val leftovers = tempDir.listFiles()?.filter { it.name.startsWith("removing.bin") }.orEmpty()
@@ -713,8 +697,8 @@ class DownloadEngineIntegrationTest {
         assertEquals(expected.size.toLong(), task.totalSize)
         // 分片目录在任务确认 COMPLETE 后才清理，等待清理完成
         runBlocking {
-            withTimeout(5_000L) {
-                while (File(tempDir, "movie.hls").exists()) delay(20)
+            awaitUntilSuspend(TestTimeouts.MEDIUM, describe = { "合成成功后分片目录未被清理" }) {
+                !File(tempDir, "movie.hls").exists()
             }
         }
         assertFalse(File(tempDir, "movie.hls").exists(), "合成成功后应清理分片目录")
@@ -948,17 +932,8 @@ class DownloadEngineIntegrationTest {
     }
 
     private fun awaitTerminal(id: String): DownloadTask = runBlocking {
-        withTimeout(30_000L) {
-            engine.taskState.first { tasks ->
-                tasks.any {
-                    it.id == id &&
-                        it.status in setOf(
-                            DownloadStatus.COMPLETED,
-                            DownloadStatus.FAILED,
-                            DownloadStatus.CANCELLED,
-                        )
-                }
-            }.first { it.id == id }
+        engine.taskState.awaitElement(TestTimeouts.LONG, { "任务 $id 未在超时前进入终态" }) {
+            it.id == id && it.status.isTerminal
         }
     }
 

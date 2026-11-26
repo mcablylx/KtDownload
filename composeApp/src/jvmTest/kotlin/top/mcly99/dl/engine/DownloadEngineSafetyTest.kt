@@ -2,11 +2,14 @@ package top.mcly99.dl.engine
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import top.mcly99.dl.model.DownloadStatus
 import top.mcly99.dl.model.DownloadTask
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitElement
+import top.mcly99.dl.testutil.awaitUntil
+import top.mcly99.dl.testutil.awaitValue
+import top.mcly99.dl.testutil.isTerminal
 import java.io.File
 import java.net.InetSocketAddress
 import java.nio.file.Files
@@ -159,10 +162,10 @@ class DownloadEngineSafetyTest {
         engine.requestDispatch()
 
         runBlocking {
-            withTimeout(5_000L) {
-                engine.taskState.first { tasks ->
-                    tasks.count { it.status == DownloadStatus.DOWNLOADING } >= 3
-                }
+            engine.taskState.awaitValue(TestTimeouts.SHORT, {
+                "并发上限调大后仍有任务排队: ${engine.taskState.value.map { it.status }}"
+            }) { tasks ->
+                tasks.count { it.status == DownloadStatus.DOWNLOADING } >= 3
             }
         }
     }
@@ -177,30 +180,21 @@ class DownloadEngineSafetyTest {
         )
         engine.startDownload(id)
         return runBlocking {
-            withTimeout(20_000L) {
-                engine.taskState.first { tasks ->
-                    tasks.any {
-                        it.id == id && it.status in setOf(
-                            DownloadStatus.COMPLETED,
-                            DownloadStatus.FAILED,
-                            DownloadStatus.CANCELLED,
-                        )
-                    }
-                }.first { it.id == id }
+            engine.taskState.awaitElement(TestTimeouts.LONG, { "任务 $id 未在超时前进入终态" }) {
+                it.id == id && it.status.isTerminal
             }
         }
     }
 
     private fun awaitStatus(id: String, status: DownloadStatus) = runBlocking {
-        withTimeout(10_000L) {
-            engine.taskState.first { tasks -> tasks.any { it.id == id && it.status == status } }
+        engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未在超时前变为 $status" }) {
+            it.id == id && it.status == status
         }
     }
 
     /** removeTask 的清理在协程里做（要等下载协程退出），断言前轮询等它完成 */
-    private fun waitUntilGone(file: File, timeoutMs: Long = 5_000L) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (file.exists() && System.currentTimeMillis() < deadline) Thread.sleep(50)
+    private fun waitUntilGone(file: File, timeoutMs: Long = TestTimeouts.MEDIUM) {
+        awaitUntil(timeoutMs, describe = { "文件仍在磁盘上: ${file.path}" }) { !file.exists() }
     }
 
     private fun slowResponse(exchange: HttpExchange, supportsRange: Boolean) {
