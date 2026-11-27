@@ -103,16 +103,22 @@ internal fun collectLoginCookies(
 }.getOrNull()
 
 /**
- * 迅雷网页登录：站点把凭据放在 localStorage 而非 Cookie，JCEF 取不到 JS 返回值，
- * 所以由 `COOKIE_BRIDGE_SCRIPT` 把 JSON 分片写进 `yunx_xl_cred_*` Cookie。
+ * 迅雷网页登录：站点把凭据放在 localStorage 而非 Cookie。首选 [XunleiBridgeHandler]
+ * 内存通道（XunleiWebCredential.MESSAGE_BRIDGE_SCRIPT 经 CefMessageRouter 直送 JSON）；旧版
+ * `COOKIE_BRIDGE_SCRIPT` 的分片 Cookie 仍可读，仅为兼容上一次启动残留。
  *
  * 分片拼回、URL 解码、deviceid 兜底、裸 access_token 兼容全部收敛在
- * [XunleiDriveCredential.fromCookiePairs] 一处；这里只负责把 CEF 的 Cookie
- * 收集结果交给它，并输出规范 JSON（含 refresh_token，过期后能自动刷新）。
+ * [XunleiDriveCredential] 一处；这里只负责把 CEF 的 Cookie 收集结果或内存载荷交给它，
+ * 并输出规范 JSON（含 refresh_token，过期后能自动刷新）。
  * 以前另有一个只取 access_token 的 `collectXunleiAccessToken` 兜底入口，
  * 会把 refresh_token 丢掉，已删除。
  */
-internal fun collectXunleiCredential(): String? = runCatching {
+internal fun collectXunleiCredential(bridge: XunleiBridgeHandler? = null): String? = runCatching {
+    // P2-15：首选 CefMessageRouter 内存通道；只有本次没有新查询时才读旧 Cookie，
+    // 兼容上一次启动残留的桥接 Cookie（读完即删）。
+    bridge?.consume()?.let { raw ->
+        XunleiDriveCredential.parse(raw)?.takeIf { it.isUsable }?.toJson()?.let { return@runCatching it }
+    }
     val pairs = cookiePairs(listOf("xunlei.com")).toMap()
     if (pairs.isEmpty()) return@runCatching null
     XunleiDriveCredential.fromCookiePairs(pairs)?.takeIf { it.isUsable }?.toJson()

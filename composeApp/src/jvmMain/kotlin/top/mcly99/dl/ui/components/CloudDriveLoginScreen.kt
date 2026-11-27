@@ -48,6 +48,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.cef.CefClient
 import org.cef.browser.CefBrowser
+import org.cef.browser.CefMessageRouter
 import top.mcly99.dl.engine.clouddrive.CloudDriveCatalog
 import top.mcly99.dl.engine.clouddrive.CloudDriveLoginCatalog
 import top.mcly99.dl.engine.clouddrive.CloudLoginMode
@@ -56,6 +57,8 @@ import top.mcly99.dl.engine.clouddrive.browser.clearCookies
 import top.mcly99.dl.engine.clouddrive.browser.clearXunleiBridgeCookies
 import top.mcly99.dl.engine.clouddrive.browser.collectLoginCookies
 import top.mcly99.dl.engine.clouddrive.browser.collectXunleiCredential
+import top.mcly99.dl.engine.clouddrive.browser.XunleiBridgeHandler
+import top.mcly99.dl.engine.clouddrive.browser.createXunleiBridgeRouter
 import top.mcly99.dl.theme.CloudDriveStrings
 import top.mcly99.dl.theme.FlowDownColors
 import top.mcly99.dl.theme.Strings
@@ -130,6 +133,9 @@ fun CloudDriveLoginScreen(
     DisposableEffect(browser) {
         onDispose {
             runCatching { browser?.browser?.close(true) }
+            // P2-15：先摘消息路由再 dispose client，避免回调打进已销毁的 handler
+            runCatching { browser?.bridgeRouter?.let { browser.client.removeMessageRouter(it) } }
+            runCatching { browser?.bridgeRouter?.dispose() }
             runCatching { browser?.client?.dispose() }
         }
     }
@@ -142,14 +148,15 @@ fun CloudDriveLoginScreen(
             val (credential, incomplete) = withContext(Dispatchers.IO) {
                 when (config.mode) {
                     CloudLoginMode.XUNLEI_WEB -> {
-                        // P2-15：只在可信域（https + *.xunlei.com）注入桥接脚本。
-                        // 若当前停在风控页/广告页，注入会把明文 refresh_token 写进该页面的 Cookie。
+                        // P2-15：只在可信域（https + *.xunlei.com）注入桥接脚本；
+                        // 脚本内部还会再判一次域，并把 JSON 经 CefMessageRouter 送进内存。
+                        // 若当前停在风控页/广告页，注入不会把 refresh_token 交给第三方。
                         val currentUrl = runCatching { browser.browser.url }.getOrNull()
                         if (XunleiWebCredential.isTrustedUrl(currentUrl)) {
                             runCatching {
                                 SwingUtilities.invokeLater {
                                     browser.browser.executeJavaScript(
-                                        XunleiWebCredential.COOKIE_BRIDGE_SCRIPT,
+                                        XunleiWebCredential.MESSAGE_BRIDGE_SCRIPT,
                                         XunleiWebCredential.LOGIN_URL,
                                         0,
                                     )
@@ -157,10 +164,10 @@ fun CloudDriveLoginScreen(
                             }
                         }
                         delay(400)
-                        // 规范 JSON 含 refresh_token，过期后能自动刷新；
-                        // fromCookiePairs 内部已兼容「Cookie 里只有裸 access_token」的情况。
-                        // P2-15：读回后立刻删桥接 Cookie，不让明文 token 按 max-age 躺在浏览器里。
-                        collectXunleiCredential().also { clearXunleiBridgeCookies() } to false
+                        // 优先取内存桥的载荷；collectXunleiCredential 内部仅在本次没有
+                        // 新载荷时才回退读旧 Cookie（兼容上一次启动残留）。
+                        // 顺手清掉旧桥 Cookie，不让明文 token 按 max-age 躺在浏览器里。
+                        collectXunleiCredential(browser.bridgeHandler).also { clearXunleiBridgeCookies() } to false
                     }
 
                     CloudLoginMode.COOKIE -> {
@@ -539,7 +546,12 @@ fun CloudDriveLoginScreen(
     }
 }
 
-private class BrowserHolder(val client: CefClient, val browser: CefBrowser)
+private class BrowserHolder(
+    val client: CefClient,
+    val browser: CefBrowser,
+    val bridgeHandler: XunleiBridgeHandler,
+    val bridgeRouter: CefMessageRouter?,
+)
 
 /** 初始化阶段 → 可读文案；stage 为 null 表示刚起步还没上报 */
 private fun stageLabel(s: CloudDriveStrings, stage: JcefHolder.Stage?): String = when (stage) {
@@ -555,8 +567,12 @@ private fun createBrowser(url: String): BrowserHolder? {
     val app = JcefHolder.app() ?: return null
     return runCatching {
         val client = app.createClient()
+        // P2-15：凭据通过 CefMessageRouter 直接进 JVM 内存，不再写明文 Cookie。
+        val handler = XunleiBridgeHandler()
+        val router = createXunleiBridgeRouter(handler)
+        client.addMessageRouter(router)
         // 不调用 createImmediately()：画布尚未挂到窗口（尺寸 0）时强行创建原生窗口会白屏，
         // 交给 java-cef 在 addNotify 拿到真实尺寸后自行创建。
-        BrowserHolder(client, client.createBrowser(url, false, false))
+        BrowserHolder(client, client.createBrowser(url, false, false), handler, router)
     }.getOrNull()
 }

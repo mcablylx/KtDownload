@@ -5,6 +5,7 @@ import top.mcly99.dl.utils.FfmpegLocator
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import org.junit.Assume.assumeTrue
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -211,10 +212,11 @@ class FfmpegMuxerTest {
      */
     @Test
     fun real_ffmpeg_muxes_ts_segments_to_playable_mp4() = runBlocking {
-        // 早期用 org.junit.Assume 表达「环境不具备则跳过」；统一到 kotlin.test 后
-        // 改成提前 return —— 没有 ffmpeg（或缺 lavfi/mpeg4 编码器）时不产生假失败（P3-T4）
-        val ffmpegBinary = locateFfmpeg() ?: return@runBlocking
-        if (!canGenerateTestClip(ffmpegBinary)) return@runBlocking
+        // P2-29：环境不具备时用 Assume 标记 SKIPPED，不再提前 return 假装通过。
+        // 没有 ffmpeg（或缺 lavfi/mpeg4 编码器）时不产生假失败，但报告如实显示跳过。
+        val ffmpegBinary = locateFfmpeg()
+            .also { assumeTrue("本机没有可用的 ffmpeg，跳过真实转封装冒烟", it != null) }!!
+        assumeTrue("ffmpeg 缺少 lavfi/mpeg4 编码器，跳过真实转封装冒烟", canGenerateTestClip(ffmpegBinary))
 
         val segmentsDir = File(tempDir, "real.hls").apply { mkdirs() }
         val segments = List(2) { index ->
@@ -286,8 +288,9 @@ class FfmpegMuxerTest {
      */
     @Test
     fun real_ffmpeg_muxes_video_with_separate_audio_track() = runBlocking {
-        val ffmpegBinary = locateFfmpeg() ?: return@runBlocking
-        if (!canGenerateTestClip(ffmpegBinary)) return@runBlocking
+        val ffmpegBinary = locateFfmpeg()
+            .also { assumeTrue("本机没有可用的 ffmpeg，跳过真实转封装冒烟", it != null) }!!
+        assumeTrue("ffmpeg 缺少 lavfi/mpeg4 编码器，跳过真实转封装冒烟", canGenerateTestClip(ffmpegBinary))
 
         val segmentsDir = File(tempDir, "real-audio.hls").apply { mkdirs() }
         val videoSegments = List(2) { index ->

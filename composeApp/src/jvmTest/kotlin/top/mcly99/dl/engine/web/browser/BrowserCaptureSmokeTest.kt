@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import top.mcly99.dl.engine.web.MediaKind
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import org.junit.Assume.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -17,8 +18,9 @@ import kotlin.test.assertTrue
  * 纯单测能覆盖：它的价值就在于「一个只会用 JS 换地址的页面，真的能被拦下来」。
  * mock 掉浏览器恰好把唯一想验证的东西（Chrome 升级后行为有没有变）也 mock 掉了。
  *
- * - 只有设置环境变量 `KTDL_CDP_SMOKE=1` 时才执行，其余情况直接返回（与 `KTDL_VLC_SMOKE` 一致）；
- * - 需要一个本机 Chrome / Edge / Chromium，找不到就跳过；
+ * - 只有设置环境变量 `KTDL_CDP_SMOKE=1` 时才执行，其余情况用 JUnit Assume **标记为 SKIPPED**
+ *   （P2-29：不再静默 return 假装通过）；
+ * - 需要一个本机 Chrome / Edge / Chromium，找不到同样标记 SKIPPED；
  * - 本地假站点，不依赖外部网络：`/page` 用 `fetch` 换地址 → `/api/play` 返回带签名的 m3u8。
  *
  * 手工验证命令：
@@ -30,12 +32,12 @@ class BrowserCaptureSmokeTest {
 
     @Test
     fun captures_a_playlist_injected_by_javascript() {
-        if (System.getenv("KTDL_CDP_SMOKE") != "1") return
-
-        val browser = BrowserLocator.find() ?: run {
-            println("[skip] 本机没有 Chrome / Edge / Chromium，无法跑 CDP 冒烟测试")
-            return
-        }
+        assumeTrue(
+            "未设置 KTDL_CDP_SMOKE=1，跳过真实浏览器冒烟",
+            System.getenv("KTDL_CDP_SMOKE") == "1",
+        )
+        val browser = BrowserLocator.find()
+        assumeTrue("本机没有 Chrome / Edge / Chromium，无法跑 CDP 冒烟测试", browser != null)
 
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/page") { exchange ->
@@ -70,7 +72,7 @@ class BrowserCaptureSmokeTest {
 
         try {
             val pageUrl = "http://127.0.0.1:${server.address.port}/page"
-            val result = BrowserCapture(browser = browser).capture(pageUrl)
+            val result = BrowserCapture(browser = browser!!).capture(pageUrl)
             val playlist = result.candidates.firstOrNull { it.url.contains("index.m3u8") }
 
             assertNotNull(

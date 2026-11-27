@@ -11,6 +11,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assume.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -19,7 +20,7 @@ import kotlin.test.assertTrue
  * 真起播的冒烟测试（**默认不跑**）。
  *
  * 播放依赖 native libvlc 与图形栈，无头 CI 上不可靠，所以：
- * - 只有设置环境变量 `KTDL_VLC_SMOKE=1` 时才执行，其余情况直接返回；
+ * - 只有设置环境变量 `KTDL_VLC_SMOKE=1` 时才执行，其余情况用 Assume 标记为 SKIPPED（P2-29）；
  * - 需要 `resources/<平台>/` 下已有 libvlc（先跑过 `./gradlew :composeApp:vlcSetup`）；
  * - 用随包 ffmpeg 现造测试视频，不依赖任何外部网络。
  *
@@ -37,12 +38,10 @@ class VlcPlaybackSmokeTest {
 
     @Test
     fun plays_a_local_mp4_and_delivers_frames() {
-        if (!smokeEnabled()) return
+        smokeAssumption()
 
-        val sample = createSampleVideo() ?: run {
-            println("[skip] 没有可用的 ffmpeg，无法生成测试视频")
-            return
-        }
+        val sample = createSampleVideo()
+            .also { assumeTrue("没有可用的 ffmpeg，无法生成测试视频", it != null) }!!
 
         val harness = Harness()
         try {
@@ -72,12 +71,10 @@ class VlcPlaybackSmokeTest {
      */
     @Test
     fun hls_segments_inherit_media_level_referer() {
-        if (!smokeEnabled()) return
+        smokeAssumption()
 
-        val dir = createSampleHls() ?: run {
-            println("[skip] 没有可用的 ffmpeg，无法生成 HLS")
-            return
-        }
+        val dir = createSampleHls()
+            .also { assumeTrue("没有可用的 ffmpeg，无法生成 HLS", it != null) }!!
 
         val referer = "https://page.example.com/watch/42"
         val seenReferers = Collections.synchronizedList(mutableListOf<String?>())
@@ -148,12 +145,10 @@ class VlcPlaybackSmokeTest {
      */
     @Test
     fun hls_segments_carry_injected_cookie() {
-        if (!smokeEnabled()) return
+        smokeAssumption()
 
-        val dir = createSampleHls() ?: run {
-            println("[skip] 没有可用的 ffmpeg，无法生成 HLS")
-            return
-        }
+        val dir = createSampleHls()
+            .also { assumeTrue("没有可用的 ffmpeg，无法生成 HLS", it != null) }!!
 
         val cookie = "SESSDATA=abc123%2C456; bili_jct=deadbeef"
         // 路径 → 该次请求带的 Cookie，保留「播放列表 / 分片」的区分
@@ -210,11 +205,11 @@ class VlcPlaybackSmokeTest {
 
     // ------------------------------------------------------------------ 辅助
 
-    private fun smokeEnabled(): Boolean {        if (System.getenv("KTDL_VLC_SMOKE") != "1") {
-            println("[skip] 未设置 KTDL_VLC_SMOKE=1，跳过真实起播")
-            return false
-        }
-        return true
+    private fun smokeAssumption() {
+        assumeTrue(
+            "未设置 KTDL_VLC_SMOKE=1，跳过真实起播",
+            System.getenv("KTDL_VLC_SMOKE") == "1",
+        )
     }
 
     /** 播放器 + 三个断言点 */

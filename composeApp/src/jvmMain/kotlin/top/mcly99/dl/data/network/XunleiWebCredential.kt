@@ -215,27 +215,29 @@ object XunleiWebCredential {
         }catch(e){}})()
     """.trimIndent()
 
+    /** P2-15：CefMessageRouter 的 JS 查询函数名（内存通道，不再经过 document.cookie） */
+    const val BRIDGE_QUERY_FUNCTION = "ktDownloadReadXunleiCredential"
+    const val BRIDGE_CANCEL_FUNCTION = "ktDownloadCancelXunleiCredential"
+
     /**
-     * 桌面 JCEF 不支持取 executeJavaScript 的返回值，所以改为「把凭据写进 Cookie，再从 Cookie 读回」：
-     * 该脚本从 localStorage 取 credentials_<clientId>（子账号 `...@<current_sub>`），补上
-     * deviceid Cookie → device_id、captcha_<clientId> → captcha_token，再 URL 编码后分片
-     * 写入 `yunx_xl_cred_*` Cookie；Kotlin 侧轮询 Cookie 拼回原文并解析。
+     * 两种桌面桥共用的「取凭据原文」逻辑：只在 https 的 xunlei.com / 子域执行，
+     * 从 localStorage 取 credentials_<clientId>（子账号 `...@<current_sub>`），补上
+     * deviceid Cookie → device_id、captcha_<clientId> → captcha_token，返回 JSON 字符串。
      *
-     * 分片是因为 access+refresh token 的 JSON 可能超过单条 Cookie 4KB 上限，直接写会被浏览器静默丢弃。
+     * 域名白名单必须留在最前面：登录过程会跳 i.xunlei.com 等官方域，若停在风控页/广告页，
+     * 注入脚本等于把 refresh_token 交给第三方。
      */
-    val COOKIE_BRIDGE_SCRIPT: String = """
+    private val BRIDGE_PAYLOAD_JS: String = """
         (function(){try{
-          // P2-15：只允许在 https 的 xunlei.com 及其子域写桥接 Cookie。
-          // 登录过程会跳 i.xunlei.com 等官方域；若当前页面是风控页/广告页，注入等于把 refresh_token 送出去。
           var host=String(location.hostname||'').toLowerCase();
-          if(host!=='xunlei.com'&&!/\.xunlei\.com${'$'}/.test(host))return;
+          if(host!=='xunlei.com'&&!/\.xunlei\.com${'$'}/.test(host))return '';
           var prefix='$STORAGE_KEY';
           var sub=localStorage.getItem('current_sub');
           var raw=sub?localStorage.getItem(prefix+'@'+sub):localStorage.getItem(prefix);
-          if(!raw)return;
+          if(!raw)return '';
           var data=JSON.parse(raw);
-          if(!data||typeof data!=='object'||Array.isArray(data))return;
-          if(sub&&data.sub&&String(data.sub)!==sub)return;
+          if(!data||typeof data!=='object'||Array.isArray(data))return '';
+          if(sub&&data.sub&&String(data.sub)!==sub)return '';
           try{
             var c=JSON.parse(localStorage.getItem('$CAPTCHA_KEY')||'{}');
             if(c&&c.token&&Date.parse(c.expires_at)>Date.now())data.captcha_token=c.token;
@@ -266,11 +268,38 @@ object XunleiWebCredential {
               }
             }catch(e){}
           }
-          var payload=encodeURIComponent(JSON.stringify(data));
+          return JSON.stringify(data);
+        }catch(e){return ''}})()
+    """.trimIndent()
+
+    /**
+     * P2-15 首选通道：通过 JCEF CefMessageRouter 把凭据 JSON 直接从渲染进程送到 JVM 内存。
+     * 不再写 `document.cookie`，明文 refresh_token 不进浏览器 Cookie 存储、不进 CEF 日志。
+     */
+    val MESSAGE_BRIDGE_SCRIPT: String = """
+        (function(){
+          var payload=$BRIDGE_PAYLOAD_JS;
+          if(!payload)return;
+          window.$BRIDGE_QUERY_FUNCTION(payload, function(){}, function(){});
+        })()
+    """.trimIndent()
+
+    /**
+     * 旧版 Cookie 桥脚本（保留只为兼容旧客户端代码路径，桌面登录窗已不再注入）。
+     *
+     * 分片是因为 access+refresh token 的 JSON 可能超过单条 Cookie 4KB 上限；明文会按
+     * max-age 躺在浏览器里，正是 P2-15 要消除的风险。Kotlin 侧仍保留读回能力以兼容
+     * 上一次启动残留的桥接 Cookie，读完即删。
+     */
+    val COOKIE_BRIDGE_SCRIPT: String = """
+        (function(){try{
+          var payload=$BRIDGE_PAYLOAD_JS;
+          if(!payload)return;
+          var enc=encodeURIComponent(payload);
           var size=3000;
-          var n=Math.ceil(payload.length/size); if(n<1)n=1;
+          var n=Math.ceil(enc.length/size); if(n<1)n=1;
           for(var j=0;j<n;j++){
-            document.cookie='$CRED_COOKIE_PREFIX'+j+'='+payload.substr(j*size,size)+';path=/;max-age=120;Secure;SameSite=Lax';
+            document.cookie='$CRED_COOKIE_PREFIX'+j+'='+enc.substr(j*size,size)+';path=/;max-age=120;Secure;SameSite=Lax';
           }
           document.cookie='$CRED_COOKIE_COUNT='+n+';path=/;max-age=120;Secure;SameSite=Lax';
         }catch(e){}})()

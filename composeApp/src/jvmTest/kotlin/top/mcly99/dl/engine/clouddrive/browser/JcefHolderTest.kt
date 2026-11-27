@@ -1,5 +1,6 @@
 package top.mcly99.dl.engine.clouddrive.browser
 
+import org.junit.Assume.assumeTrue
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -45,7 +46,10 @@ class JcefHolderTest {
      */
     @Test
     fun starts_the_embedded_browser_on_this_machine() {
-        if (System.getenv("MCLY_JCEF_SMOKE") != "1") return
+        assumeTrue(
+            "未设置 MCLY_JCEF_SMOKE=1，跳过真实 JCEF 启动",
+            System.getenv("MCLY_JCEF_SMOKE") == "1",
+        )
         assertTrue(JcefHolder.hasLocalKernel(), "冒烟测试要求内核已在本地")
         JcefHolder.initInBackground(allowDownload = false)
         awaitUntil(TestTimeouts.BROWSER, intervalMs = 500, describe = {
