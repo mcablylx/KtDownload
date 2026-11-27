@@ -405,6 +405,7 @@ private fun ResultPane(vm: CloudDriveViewModel) {
 
 @Composable
 private fun MetaRow(resolution: CloudResolution) {
+    val s = Strings.current
     Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -425,13 +426,13 @@ private fun MetaRow(resolution: CloudResolution) {
         )
         if (resolution.passcode.isNotBlank()) {
             Text(
-                "提取码 ${resolution.passcode}",
+                s.cloudDriveStrings.passcodeLabel(resolution.passcode),
                 style = MaterialTheme.typography.labelSmall,
                 color = FlowDownColors.MutedForeground,
             )
         }
         Text(
-            "${Strings.current.cloudDriveStrings.found(resolution.fileCount)} · ${formatBytes(resolution.totalSize)}",
+            "${s.cloudDriveStrings.found(resolution.fileCount)} · ${formatBytes(resolution.totalSize)}",
             style = MaterialTheme.typography.labelSmall,
             color = FlowDownColors.MutedForeground,
         )

@@ -221,7 +221,10 @@ private fun runUi() {
     application {
         val icon = painterResource(Res.drawable.img_log)
         val initialSettings = remember { SettingsRepository.load() }
-        val strings = remember(initialSettings.language) { stringsFor(initialSettings.language) }
+        // 窗口标题 / 托盘文案必须跟随运行时语言：以前是 remember(initialSettings.language)
+        // 的启动快照，在设置里切换语言后只有界面内容变了，标题栏和托盘菜单还是旧语言（P2-22）。
+        var language by remember { mutableStateOf(initialSettings.language) }
+        val strings = remember(language) { stringsFor(language) }
 
         var windowVisible by remember { mutableStateOf(true) }
         var minimizeToTray by remember { mutableStateOf(initialSettings.minimizeToTray) }
@@ -260,6 +263,12 @@ private fun runUi() {
             }
         }
 
+        // 语言变化时就地刷新托盘菜单文案（不重建 TrayIcon）；托盘未安装时只更新内部文案，
+        // 之后 setup 会读到同一份新语言的值。
+        LaunchedEffect(language) {
+            TrayHelper.updateLabels(strings.trayShowWindow, strings.trayExit, strings.trayTooltip)
+        }
+
         // 从托盘「藏起来」再叫回来：窗口从不可见变可见时，Compose 的 visible 只负责显示，
         // 不负责把窗口抬到最前（macOS 上会被别的应用盖住）。等窗口真正显示出来再置前一次。
         LaunchedEffect(windowVisible) {
@@ -290,6 +299,7 @@ private fun runUi() {
             AppNew(
                 onMinimizeToTrayChange = { minimizeToTray = it },
                 onExit = { exitApplication() },
+                onLanguageChange = { language = it },
                 onNotification = { title, message ->
                     try {
                         TrayHelper.notify(title, message)

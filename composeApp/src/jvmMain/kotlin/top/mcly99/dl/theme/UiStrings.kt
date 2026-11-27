@@ -42,6 +42,8 @@ data class CloudDriveStrings(
     val title: String,
     val urlPlaceholder: String,
     val passcodePlaceholder: String,
+    /** 解析结果行的「提取码 X」：以前在 UI 里硬编码中文，英文界面也显示中文（P2-22） */
+    val passcodeLabel: (String) -> String,
     val action: String,
     val hint: String,
     val idle: String,
@@ -711,6 +713,7 @@ fun zhCN() = UiStrings(
         title = "云盘",
         urlPlaceholder = "解析地址：粘贴网盘分享链接、中文口令或 GitHub 仓库/Releases/直链",
         passcodePlaceholder = "提取码(可选)",
+        passcodeLabel = { "提取码 $it" },
         action = "解析",
         hint = "上半「解析结果」浏览分享文件并下载（文件夹可整体下载）；下半「网盘列表」点击网盘卡片，在软件内打开该网盘的网页登录页",
         idle = "粘贴分享链接后点「解析」",
@@ -921,7 +924,7 @@ fun zhCN() = UiStrings(
 )
 
 fun enUS() = UiStrings(
-    appName = "下载管理器",
+    appName = "Download Manager",
     appSubtitle = "Efficient Multi-protocol Download Manager",
     transferApp = "KtDownload",
     version = { "Version $it" },
@@ -1112,6 +1115,7 @@ fun enUS() = UiStrings(
         title = "Cloud Drive",
         urlPlaceholder = "Share URL: paste a netdisk link, a Chinese share command or a GitHub repo/Releases/direct URL",
         passcodePlaceholder = "Passcode (optional)",
+        passcodeLabel = { "Passcode: $it" },
         action = "Resolve",
         hint = "Top: browse and download the resolved share (whole folders included). Bottom: click a netdisk to open its web login inside the app",
         idle = "Paste a share link and click Resolve",
@@ -1291,7 +1295,7 @@ fun enUS() = UiStrings(
     trayShowWindow = "Show Window",
     trayExit = "Exit",
     trayTooltip = "KtDownload",
-    windowTitle = "下载管理器",
+    windowTitle = "Download Manager",
 
     timeSeconds = { "${it}s" },
     timeMinutes = { m, s -> "${m}m${s}s" },

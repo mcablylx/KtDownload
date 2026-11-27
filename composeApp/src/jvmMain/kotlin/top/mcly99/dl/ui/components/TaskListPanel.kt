@@ -93,6 +93,7 @@ import top.mcly99.dl.model.UiTask
 import top.mcly99.dl.model.ViewType
 import top.mcly99.dl.theme.FlowDownColors
 import top.mcly99.dl.theme.FlowDownTheme
+import top.mcly99.dl.theme.LocalTaskActionStrings
 import top.mcly99.dl.theme.Strings
 import top.mcly99.dl.utils.estimateTimeRemaining
 import top.mcly99.dl.utils.formatBytes
@@ -170,6 +171,7 @@ private fun TaskCard(
     onCleanupSegments: () -> Unit = {},
 ) {
     val s = Strings.current
+    val a = LocalTaskActionStrings.current
     val borderColor = if (task.status == DownloadStatus.FAILED) FlowDownColors.Destructive.copy(alpha = 0.3f) else FlowDownColors.Border
     Column(
         Modifier
@@ -198,11 +200,11 @@ private fun TaskCard(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         when (task.status) {
                             DownloadStatus.DOWNLOADING, DownloadStatus.MERGING ->
-                                TaskIconButton(Icons.Default.Pause, onPause)
+                                TaskIconButton(Icons.Default.Pause, onPause, a.pause)
                             DownloadStatus.PAUSED, DownloadStatus.QUEUED ->
-                                TaskIconButton(Icons.Default.PlayArrow, onResume)
+                                TaskIconButton(Icons.Default.PlayArrow, onResume, a.resume)
                             DownloadStatus.FAILED, DownloadStatus.CANCELLED ->
-                                TaskIconButton(Icons.Default.Refresh, onRetry)
+                                TaskIconButton(Icons.Default.Refresh, onRetry, a.retry)
                             else -> {}
                         }
                         // HLS 失败/降级完成时，分片目录还在磁盘上（峰值能到文件的两倍）。
@@ -214,8 +216,8 @@ private fun TaskCard(
                                 contentDescription = s.cleanupSegments,
                             )
                         }
-                        TaskIconButton(Icons.Default.FolderOpen, onOpenFolder)
-                        TaskIconButton(Icons.Default.Close, onRemove)
+                        TaskIconButton(Icons.Default.FolderOpen, onOpenFolder, a.openFolder)
+                        TaskIconButton(Icons.Default.Close, onRemove, a.remove)
                     }
                 }
                 if (task.error != null && (task.status == DownloadStatus.FAILED || task.status == DownloadStatus.COMPLETED)) {
@@ -287,9 +289,10 @@ private fun TaskCard(
     }
 }
 
-/** 任务卡片上的图标按钮：与设置页的 36dp 图标按钮保持一致。 */
+/** 任务卡片上的图标按钮：与设置页的 36dp 图标按钮保持一致。
+ *  [contentDescription] 必填 —— 纯图标按钮缺它，读屏用户只能听到「按钮」（P2-23）。 */
 @Composable
-private fun TaskIconButton(icon: ImageVector, onClick: () -> Unit, contentDescription: String? = null) {
+private fun TaskIconButton(icon: ImageVector, onClick: () -> Unit, contentDescription: String) {
     IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
         Icon(
             icon,

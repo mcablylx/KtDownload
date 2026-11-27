@@ -26,7 +26,9 @@ import top.mcly99.dl.model.ViewType
 import top.mcly99.dl.theme.FlowDownColors
 import top.mcly99.dl.theme.FlowDownTheme
 import top.mcly99.dl.theme.LocalStrings
+import top.mcly99.dl.theme.LocalTaskActionStrings
 import top.mcly99.dl.theme.myDriveStrings
+import top.mcly99.dl.theme.taskActionStrings
 import top.mcly99.dl.theme.removeTaskStrings
 import top.mcly99.dl.theme.shutdownStrings
 import top.mcly99.dl.theme.updateStrings
@@ -65,6 +67,8 @@ fun AppNew(
     onMinimizeToTrayChange: (Boolean) -> Unit = {},
     onNotification: (String, String) -> Unit = { _, _ -> },
     onExit: () -> Unit = {},
+    /** 运行时语言上报：窗口标题 / 托盘在 AppNew 之外，拿不到这里的 settings（P2-22） */
+    onLanguageChange: (String) -> Unit = {},
 ) {
     val viewModel = remember { AppViewModel() }
 
@@ -82,6 +86,7 @@ fun AppNew(
     val strings = viewModel.strings
     // P4 文案独立选表，不占 UiStrings 构造槽位
     val myDrive = myDriveStrings(settings.language)
+    val taskActions = taskActionStrings(settings.language)
     val shutdownText = shutdownStrings(settings.language)
     val removeTaskText = removeTaskStrings(settings.language)
     val updateText = updateStrings(settings.language)
@@ -137,8 +142,17 @@ fun AppNew(
         onMinimizeToTrayChange(settings.minimizeToTray)
     }
 
+    // 窗口标题与托盘菜单定义在 main.kt（AppNew 之外），拿不到这里的 settings。
+    // 把运行时语言上报出去，切语言时它们才会跟着变（P2-22）。
+    LaunchedEffect(settings.language) {
+        onLanguageChange(settings.language)
+    }
+
     FlowDownTheme(theme = settings.theme) {
-        CompositionLocalProvider(LocalStrings provides strings) {
+        CompositionLocalProvider(
+            LocalStrings provides strings,
+            LocalTaskActionStrings provides taskActions,
+        ) {
             // 外层 Box 是必须的：播放页要盖住整个 Row（含侧栏），两者得有共同父布局
             Box(Modifier.fillMaxSize()) {
                 Row(Modifier.fillMaxSize().background(FlowDownColors.Background)) {
@@ -165,6 +179,9 @@ fun AppNew(
                             onClearCompleted = viewModel::clearCompleted,
                             onClearAll = { clearAllConfirmOpen = true },
                             hasTasks = viewModel.totalTaskCount > 0,
+                            canStartAll = viewModel.batchActions.startAll,
+                            canPauseAll = viewModel.batchActions.pauseAll,
+                            canClearCompleted = viewModel.batchActions.clearCompleted,
                             totalDownloadSpeed = viewModel.totalDownloadSpeed,
                             totalUploadSpeed = viewModel.transfer.totalUploadSpeed,
                             catchWeb = catchWebHeader,

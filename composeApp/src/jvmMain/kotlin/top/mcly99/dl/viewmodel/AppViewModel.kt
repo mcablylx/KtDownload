@@ -39,7 +39,9 @@ import top.mcly99.dl.engine.web.MediaCandidate
 import top.mcly99.dl.engine.web.browser.BrowserCapture
 import top.mcly99.dl.engine.web.downloadFileNameFor
 import top.mcly99.dl.model.AppSettings
+import top.mcly99.dl.model.BatchActionsEnabled
 import top.mcly99.dl.model.DownloadStatus
+import top.mcly99.dl.model.batchActionsEnabled
 import top.mcly99.dl.model.UiDevice
 import top.mcly99.dl.model.UiTask
 import top.mcly99.dl.model.UiTransfer
@@ -120,6 +122,20 @@ class AppViewModel {
             delay(AppConstants.TOAST_VISIBLE_MS)
             toast = null
         }
+    }
+
+    /**
+     * 任务入队失败的统一反馈（P2-20）。
+     *
+     * 抓网页 / 云盘直链 / 手动添加这三处入队失败以前只调 [notify]，而 [notify] 受
+     * 「显示通知」开关约束 —— 关掉通知后填错保存路径、点「添加任务」，既没有任务
+     * 也没有任何提示，看起来像按钮失灵。与 [cleanupTaskSegments] 一样走双通道：
+     * 系统通知按开关，应用内提示始终可见。
+     */
+    private fun reportEnqueueFailure(e: Throwable, fallback: String) {
+        val message = enqueueFailureMessage(e, fallback)
+        notify(strings.notifyDownloadFailed, message)
+        showToast(message)
     }
 
     var settings by mutableStateOf(loadInitialSettings())
@@ -292,6 +308,8 @@ class AppViewModel {
     val completedTaskCount: Int by derivedStateOf {
         uiTasks.count { it.status == DownloadStatus.COMPLETED }
     }
+    /** 顶栏批量按钮的可用状态；口径见 [batchActionsEnabled]（P2-23） */
+    val batchActions: BatchActionsEnabled by derivedStateOf { batchActionsEnabled(uiTasks) }
     val totalDownloadSpeed: Long by derivedStateOf {
         uiTasks.filter { it.status == DownloadStatus.DOWNLOADING }.sumOf { it.speed }
     }
@@ -353,7 +371,7 @@ class AppViewModel {
             .onSuccess { catchWeb.markAdded(candidate.url) }
             .onFailure { e ->
                 AppLogger.warn("AppViewModel", "抓网页任务入队失败: ${e.message}", e)
-                notify(strings.notifyDownloadFailed, e.message ?: candidate.url)
+                reportEnqueueFailure(e, candidate.url)
             }
     }
 
@@ -400,7 +418,7 @@ class AppViewModel {
             .onSuccess { cloudDrive.markAdded(link.url) }
             .onFailure { e ->
                 AppLogger.warn("AppViewModel", "云盘任务入队失败: ${e.message}", e)
-                notify(strings.notifyDownloadFailed, e.message ?: link.filename)
+                reportEnqueueFailure(e, link.filename)
             }
             // 返回 taskId：CloudDriveViewModel 要用它把「任务终态」与
             // 「这条直链在用户网盘里建的临时转存目录」关联起来清理
@@ -623,7 +641,7 @@ class AppViewModel {
                 }
                 downloads.addDownload(url, path, threads)
             }.onFailure { e ->
-                notify(strings.notifyDownloadFailed, e.message ?: url)
+                reportEnqueueFailure(e, url)
             }
         }
     }
@@ -804,3 +822,11 @@ class AppViewModel {
         scope.cancel()
     }
 }
+
+/**
+ * 入队失败提示文案：优先用异常自带的说明（例如「保存路径不是文件夹」），
+ * 异常没有 message 时退回链接 / 文件名，保证双通道里至少有一条能定位问题（P2-20）。
+ * 抽成纯函数便于单测，不依赖 ViewModel 实例。
+ */
+internal fun enqueueFailureMessage(e: Throwable, fallback: String): String =
+    e.message?.takeIf { it.isNotBlank() } ?: fallback

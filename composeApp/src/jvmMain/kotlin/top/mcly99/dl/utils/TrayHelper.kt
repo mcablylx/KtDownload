@@ -47,6 +47,29 @@ import java.awt.GraphicsEnvironment
 object TrayHelper {
     private var trayIcon: TrayIcon? = null
 
+    /**
+     * 托盘文案（P2-22）。
+     *
+     * 以前菜单标签是 [setup] 参数、被鼠标监听器捕获成启动快照：用户在设置里切语言后，
+     * 右键托盘菜单仍是旧语言。改成可变字段 + [updateLabels] 就地更新，不重建 TrayIcon
+     * （remove + add 会让托盘图标闪一下，还可能打断正在显示的菜单）。
+     */
+    private data class TrayLabels(
+        val showWindow: String,
+        val exit: String,
+        val tooltip: String,
+    )
+
+    @Volatile
+    private var labels = TrayLabels("Show Window", "Exit", "KtDownload")
+
+    /** 运行时语言变化后刷新托盘菜单文案与 tooltip；托盘尚未安装时只记下最新值 */
+    fun updateLabels(showWindowLabel: String, exitLabel: String, tooltip: String) {
+        labels = TrayLabels(showWindowLabel, exitLabel, tooltip)
+        runCatching { trayIcon?.toolTip = tooltip }
+            .onFailure { AppLogger.warn("TrayHelper", "更新托盘提示失败: ${it.message}", it) }
+    }
+
     val isSupported: Boolean get() = SystemTray.isSupported()
 
     /**
@@ -143,6 +166,7 @@ object TrayHelper {
     ): Boolean {
         if (!isSupported) return false
         remove()
+        labels = TrayLabels(showWindowLabel, exitLabel, tooltip)
 
         val image = loadTrayImage(iconBytes)
 
@@ -163,7 +187,7 @@ object TrayHelper {
                     lastMenuShowAt = now
                     // 菜单弹出失败只记日志：不让全局未捕获异常处理弹错误框
                     // （开发时 `gradlew clean` 会删掉热重载 classpath，右键就会踩到）
-                    runCatching { showSwingMenu(e, showWindowLabel, exitLabel, onShow, onExit) }
+                    runCatching { showSwingMenu(e, onShow, onExit) }
                         .onFailure { AppLogger.warn("TrayHelper", "托盘菜单弹出失败: ${it.message}", it) }
                 }
             })
@@ -218,18 +242,18 @@ object TrayHelper {
      */
     private fun showSwingMenu(
         e: MouseEvent,
-        showWindowLabel: String,
-        exitLabel: String,
         onShow: () -> Unit,
         onExit: () -> Unit,
     ) {
+        // 一次菜单用同一份快照，避免构建到一半切语言导致两个菜单项语种不一致
+        val labels = labels
         // 关闭上一次未关闭的菜单，避免叠加与"闪一下"的观感
         visibleMenu?.let { if (it.isVisible) it.isVisible = false }
         visibleMenu = null
 
         val menu = JPopupMenu().apply {
             font = CJK_UI_FONT
-            add(JMenuItem(showWindowLabel).apply {
+            add(JMenuItem(labels.showWindow).apply {
                 font = CJK_UI_FONT
                 addActionListener {
                     hideMenu()
@@ -237,7 +261,7 @@ object TrayHelper {
                 }
             })
             addSeparator()
-            add(JMenuItem(exitLabel).apply {
+            add(JMenuItem(labels.exit).apply {
                 font = CJK_UI_FONT
                 addActionListener {
                     // 只移除托盘图标，退出流程交给 main.kt 的 exitApplication

@@ -187,3 +187,30 @@ data class AppSettings(
      */
     val autoCheckUpdate: Boolean = true,
 )
+
+/**
+ * 顶栏三个批量按钮的可用状态（P2-23）。
+ *
+ * 以前「全部开始 / 全部暂停 / 清理已完成」永远可点：空列表、或只有已完成任务时
+ * 点下去什么都不会发生，用户只看到「点了没反应」。判定口径严格对齐三个操作
+ * 实际会处理的状态（startAll 只认 QUEUED / PAUSED，pauseAll 认
+ * DOWNLOADING / MERGING / QUEUED，clearCompleted 只认 COMPLETED），
+ * 避免按钮亮着却无事可做。
+ *
+ * 用全量任务而不是搜索过滤后的列表：批量操作作用于全部任务，与「全部」的承诺一致。
+ */
+data class BatchActionsEnabled(
+    val startAll: Boolean,
+    val pauseAll: Boolean,
+    val clearCompleted: Boolean,
+)
+
+fun batchActionsEnabled(tasks: List<UiTask>): BatchActionsEnabled = BatchActionsEnabled(
+    startAll = tasks.any { it.status == DownloadStatus.QUEUED || it.status == DownloadStatus.PAUSED },
+    pauseAll = tasks.any {
+        it.status == DownloadStatus.DOWNLOADING ||
+            it.status == DownloadStatus.MERGING ||
+            it.status == DownloadStatus.QUEUED
+    },
+    clearCompleted = tasks.any { it.status == DownloadStatus.COMPLETED },
+)

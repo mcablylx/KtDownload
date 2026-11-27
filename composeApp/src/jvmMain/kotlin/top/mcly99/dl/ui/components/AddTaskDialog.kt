@@ -15,6 +15,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import top.mcly99.dl.engine.previewFileName
 import top.mcly99.dl.model.TaskType
 import top.mcly99.dl.theme.FlowDownColors
@@ -70,7 +72,11 @@ fun AddTaskDialog(
         // 判定条件还与 getClipboardUrl() 不一致（少了「URL 必须带 path」的校验），
         // 异常也被空 catch 静默吞掉（v4-P3-10）。
         if (open && urls.isBlank()) {
-            getClipboardUrl()?.let { urls = it }
+            // AWT 剪贴板是同步阻塞调用：被 Office / 剪贴板管理器 / 远程桌面占用时可能卡住。
+            // 与 AppViewModel.observeClipboard 的口径一致，必须切到 IO，否则点「添加任务」
+            // 会直接阻塞 Compose 的 Main 调度线程（P2-21）。
+            val clipboardUrl = withContext(Dispatchers.IO) { getClipboardUrl() }
+            clipboardUrl?.let { urls = it }
         }
     }
 

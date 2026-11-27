@@ -107,6 +107,10 @@ fun HeaderBar(
     onClearCompleted: () -> Unit,
     onClearAll: () -> Unit = {},
     hasTasks: Boolean = true,
+    /** 批量按钮可用状态：空列表 / 没有可操作任务时禁用，避免点了没反应（P2-23） */
+    canStartAll: Boolean = true,
+    canPauseAll: Boolean = true,
+    canClearCompleted: Boolean = true,
     totalDownloadSpeed: Long,
     totalUploadSpeed: Long = 0L,
     catchWeb: CatchWebHeaderState = CatchWebHeaderState(),
@@ -273,9 +277,9 @@ fun HeaderBar(
                         .background(FlowDownColors.Border),
                 )
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CompactButton(text = s.startAll, onClick = onStartAll, icon = Icons.Default.PlayArrow)
-                    CompactButton(text = s.pauseAll, onClick = onPauseAll, icon = Icons.Default.Pause)
-                    CompactButton(text = s.clearCompleted, onClick = onClearCompleted, icon = Icons.Default.Delete)
+                    CompactButton(text = s.startAll, onClick = onStartAll, icon = Icons.Default.PlayArrow, enabled = canStartAll)
+                    CompactButton(text = s.pauseAll, onClick = onPauseAll, icon = Icons.Default.Pause, enabled = canPauseAll)
+                    CompactButton(text = s.clearCompleted, onClick = onClearCompleted, icon = Icons.Default.Delete, enabled = canClearCompleted)
                     // 与「清理已完成」之间加一道分隔：这条一旦点了会连未完成的任务一起清掉，
                     // 紧挨着放容易被当成同一档操作误点
                     Box(
