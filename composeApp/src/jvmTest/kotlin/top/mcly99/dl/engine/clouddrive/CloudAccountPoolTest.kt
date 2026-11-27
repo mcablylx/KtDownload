@@ -278,7 +278,7 @@ class CloudAccountPoolTest {
         s.clear(SharePlatform.QUARK)
         assertFalse(Files.exists(dir.resolve("cloud-accounts.properties")))
         assertFalse(Files.exists(dir.resolve("cloud-credentials.properties")))
-        assertTrue(Files.exists(dir.resolve("cloud-credentials.key"))) // 主密钥保留复用
+        assertTrue(Files.exists(dir.resolve("keys/cloud-credentials.key"))) // 主密钥保留复用（P3-08 迁入 keys/）
     }
 
     @Test

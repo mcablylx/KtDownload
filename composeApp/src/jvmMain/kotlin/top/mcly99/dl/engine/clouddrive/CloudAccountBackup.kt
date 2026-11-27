@@ -23,7 +23,7 @@ data class AccountBackup(
 /**
  * 网盘账号的**口令加密备份**（GAP 2.6，P5 剩余项）。
  *
- * 为什么要这一份：账号池的主密钥保存在本机 `cloud-credentials.key`，换机、重装、
+ * 为什么要这一份：账号池的主密钥保存在本机 `keys/cloud-credentials.key`，换机、重装、
  * 或者只把 `cloud-accounts.properties` 拷走，密文都解不开 —— 用户只能逐个平台重新登录。
  * 这里用「用户自己记得的口令」重新加密一份可搬运的备份：
  *

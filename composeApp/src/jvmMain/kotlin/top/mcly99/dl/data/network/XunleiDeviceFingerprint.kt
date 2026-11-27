@@ -10,7 +10,7 @@ package top.mcly99.dl.data.network
 
 import top.mcly99.dl.data.AppContext
 import java.security.MessageDigest
-import kotlin.random.Random
+import java.security.SecureRandom
 
 /**
  * 迅雷设备指纹管理器（动态生成 + 持久化）：
@@ -108,8 +108,11 @@ object XunleiDeviceFingerprint {
         return "div101.$id$md5"
     }
 
+    // P3-05：设备号是风控指纹，kotlin.random.Random 非 CSPRNG，改 SecureRandom（线程安全单例）
+    private val secureRandom = SecureRandom()
+
     private fun randomHex(len: Int): String = buildString {
-        repeat(len) { append(HEX[Random.nextInt(16)]) }
+        repeat(len) { append(HEX[secureRandom.nextInt(16)]) }
     }
 
     private fun sha1Hex(input: String): String =

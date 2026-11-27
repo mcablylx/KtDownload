@@ -9,7 +9,7 @@
 package top.mcly99.dl.data.network
 
 import top.mcly99.dl.data.AppContext
-import java.util.UUID
+import java.security.SecureRandom
 
 /**
  * 123 云盘的设备标识（`loginuuid` 请求头，32 位十六进制）。
@@ -34,9 +34,17 @@ object Pan123DeviceId {
             cached?.let { return it }
             val prefs = AppContext.miscPrefs
             val saved = prefs.get(KEY_UUID, null)?.takeIf { HEX32.matches(it) }
-            val value = saved ?: UUID.randomUUID().toString().replace("-", "").also { prefs.put(KEY_UUID, it) }
+            // P3-05：UUID.randomUUID() 内部虽用 CSPRNG，但这里显式用 SecureRandom 生成 32 hex，
+            // 与迅雷设备指纹同一熵源口径，避免依赖 JDK 实现细节。
+            val value = saved ?: newUuid().also { prefs.put(KEY_UUID, it) }
             cached = value
             return value
         }
     }
+
+    private val secureRandom = SecureRandom()
+
+    private fun newUuid(): String =
+        ByteArray(16).also { secureRandom.nextBytes(it) }
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }

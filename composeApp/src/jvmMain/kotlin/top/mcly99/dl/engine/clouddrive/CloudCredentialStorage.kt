@@ -25,14 +25,15 @@ import javax.crypto.spec.SecretKeySpec
  *
  * - 密文：`AES/GCM/NoPadding`，每条凭证一个随机 12 字节 IV；
  * - **AAD 用平台名**：把夸克的密文搬到 UC 键下会解密失败，避免跨用途重放；
- * - 主密钥：随机 32 字节，单独存 `cloud-credentials.key`，仅靠 `0600` 文件权限保护
+ * - 主密钥：随机 32 字节，存在**独立子目录** `keys/cloud-credentials.key`，仅靠 `0600` 文件权限保护
  *   （等价于上游 `DbEncryptionLevel.LOOSE`，没有 Windows DPAPI / 机器指纹包裹）；
+ *   P3-08：旧版把 key 与密文放同一目录（与本节原声明不符），现迁移到 `keys/` 并对旧 key 做无损迁移；
  * - POSIX 下目录 `0700`、两个文件 `0600`；Windows 没有 POSIX 权限，由
  *   [FilePermissions] 检查 ACL，对 Everyone / Users 可读时明确告警（P2-16，不再静默 no-op）；
- * - 写入走「临时文件 + ATOMIC_MOVE」，崩溃不会留下半截密文。
+ * - 写入走「唯一临时文件 + ATOMIC_MOVE」，崩溃不会留下半截密文。
  *
  * 与 `TaskStore` 刻意不写会话 Cookie 并不矛盾：那里拒绝的是**明文**落盘，这里是加密落盘。
- * 主密钥与密文分开存放，只拿到配置文件无法还原 Cookie。
+ * 主密钥与密文分目录存放（`keys/` 子目录），只拿到 `cloud-credentials.properties` 无法还原 Cookie。
  */
 interface CloudCredentialStorage {
     fun load(): Map<SharePlatform, String>
@@ -58,14 +59,13 @@ class FileCloudCredentialStorage(
 ) : CloudCredentialStorage {
 
     private val storeFile: Path get() = dataDir.resolve("cloud-credentials.properties")
-    private val keyFile: Path get() = dataDir.resolve("cloud-credentials.key")
 
     override fun load(): Map<SharePlatform, String> {
         val file = storeFile
         if (!Files.exists(file)) return emptyMap()
         return runCatching {
             val props = Properties().also { file.toFile().inputStream().use(it::load) }
-            val key = readOrCreateKey() ?: return@runCatching emptyMap()
+            val key = CloudCredentialKeyStore.readOrCreate(dataDir) ?: return@runCatching emptyMap()
             val result = LinkedHashMap<SharePlatform, String>()
             for (platform in SharePlatform.values()) {
                 val raw = props.getProperty(platform.name) ?: continue
@@ -93,7 +93,7 @@ class FileCloudCredentialStorage(
                 Files.deleteIfExists(storeFile)
                 return
             }
-            val key = readOrCreateKey() ?: return
+            val key = CloudCredentialKeyStore.readOrCreate(dataDir) ?: return
             val props = Properties()
             for ((platform, value) in values) {
                 if (value.isBlank()) continue
@@ -110,36 +110,6 @@ class FileCloudCredentialStorage(
         }.onFailure { e ->
             AppLogger.warn("CloudCredentialStorage", "保存网盘凭证失败: ${e.message}", e)
         }
-    }
-
-    /** 主密钥不存在时生成一份；读不到就返回 null，让调用方按「未登录」降级 */
-    private fun readOrCreateKey(): SecretKeySpec? {
-        if (!Files.exists(keyFile)) {
-            val raw = ByteArray(32).also { SecureRandom().nextBytes(it) }
-            val tmp = dataDir.resolve("cloud-credentials.key.tmp")
-            tmp.toFile().writeBytes(raw)
-            runCatching {
-                Files.move(
-                    tmp, keyFile,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-            }.onFailure {
-                // 并发首次写入时可能都抢不到 ATOMIC_MOVE：只要目标已存在就复用它
-                if (!Files.exists(keyFile)) {
-                    Files.copy(tmp, keyFile)
-                }
-                Files.deleteIfExists(tmp)
-            }
-        }
-        // P2-16：首次密钥由 load() 创建时也要收紧（旧实现只有 save() 才调用 hardenPermissions）
-        FilePermissions.hardenFile(keyFile)
-        val raw = Files.readAllBytes(keyFile)
-        if (raw.size != 32) {
-            AppLogger.warn("CloudCredentialStorage", "主密钥长度异常，忽略已保存的网盘凭证")
-            return null
-        }
-        return SecretKeySpec(raw, "AES")
     }
 
     private fun encrypt(plain: String, platform: SharePlatform, key: SecretKeySpec): String {
@@ -167,9 +137,8 @@ class FileCloudCredentialStorage(
 
     /** 每次 save 都用新文件替换：新文件继承 umask（常见 0644），必须重新收紧（P2-16 跨平台） */
     private fun hardenPermissions() {
-        FilePermissions.hardenDirectory(dataDir)
+        CloudCredentialKeyStore.harden(dataDir)
         FilePermissions.hardenFile(storeFile)
-        FilePermissions.hardenFile(keyFile)
     }
 
     private companion object {

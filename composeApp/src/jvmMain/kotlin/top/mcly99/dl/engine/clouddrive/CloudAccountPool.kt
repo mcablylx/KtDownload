@@ -63,7 +63,8 @@ class InMemoryCloudAccountStorage(
  * - **AAD 绑到「平台 + 账号 id」**：把 A 账号的密文搬到 B 账号键下会解密失败；
  * - 元数据 key：`meta|<PLATFORM>|<id>` → `base64(nickname)|base64(remark)|isPrimary|updatedAt`，
  *   不含任何凭证，明文存放以便无密钥时也能列出账号；
- * - 主密钥复用 `cloud-credentials.key`（与 [FileCloudCredentialStorage] 同一份 32 字节），
+ * - 主密钥复用 `keys/cloud-credentials.key`（与 [FileCloudCredentialStorage] 通过
+ *   [CloudCredentialKeyStore] 共享同一份 32 字节，P3-08 迁入独立子目录），
  *   加密参数一致，只是 purpose 不同，因此两套密文互不干扰；
  * - 目录 `0700`、文件 `0600`，写入走 `.tmp` + `ATOMIC_MOVE`。
  */
@@ -72,13 +73,12 @@ class FileCloudAccountStorage(
 ) : CloudAccountStorage {
 
     private val storeFile: Path get() = dataDir.resolve("cloud-accounts.properties")
-    private val keyFile: Path get() = dataDir.resolve("cloud-credentials.key")
 
     override fun load(): List<CloudAccount> {
         if (!Files.exists(storeFile)) return emptyList()
         return runCatching {
             val props = Properties().also { storeFile.toFile().inputStream().use(it::load) }
-            val key = readOrCreateKey() ?: return@runCatching emptyList()
+            val key = CloudCredentialKeyStore.readOrCreate(dataDir) ?: return@runCatching emptyList()
             val out = mutableListOf<CloudAccount>()
             for (name in props.stringPropertyNames()) {
                 if (!name.startsWith(ACCT_PREFIX)) continue
@@ -116,7 +116,7 @@ class FileCloudAccountStorage(
                 Files.deleteIfExists(storeFile)
                 return
             }
-            val key = readOrCreateKey() ?: return
+            val key = CloudCredentialKeyStore.readOrCreate(dataDir) ?: return
             val props = Properties()
             for (account in accounts) {
                 if (account.credential.isBlank()) continue
@@ -138,32 +138,6 @@ class FileCloudAccountStorage(
         }.onFailure { e ->
             AppLogger.warn("CloudAccountPool", "保存网盘账号池失败: ${e.message}", e)
         }
-    }
-
-    private fun readOrCreateKey(): SecretKeySpec? {
-        if (!Files.exists(keyFile)) {
-            val raw = ByteArray(32).also { SecureRandom().nextBytes(it) }
-            val tmp = dataDir.resolve("cloud-credentials.key.tmp")
-            tmp.toFile().writeBytes(raw)
-            runCatching {
-                Files.move(
-                    tmp, keyFile,
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE,
-                )
-            }.onFailure {
-                if (!Files.exists(keyFile)) Files.copy(tmp, keyFile)
-                Files.deleteIfExists(tmp)
-            }
-        }
-        // P2-16：首次密钥由 load() 创建时也要收紧
-        FilePermissions.hardenFile(keyFile)
-        val raw = Files.readAllBytes(keyFile)
-        if (raw.size != 32) {
-            AppLogger.warn("CloudAccountPool", "主密钥长度异常，忽略已保存的网盘账号")
-            return null
-        }
-        return SecretKeySpec(raw, "AES")
     }
 
     private fun encrypt(plain: String, purpose: String, key: SecretKeySpec): String {
@@ -226,9 +200,8 @@ class FileCloudAccountStorage(
     }
 
     private fun hardenPermissions() {
-        FilePermissions.hardenDirectory(dataDir)
+        CloudCredentialKeyStore.harden(dataDir)
         FilePermissions.hardenFile(storeFile)
-        FilePermissions.hardenFile(keyFile)
     }
 
     private companion object {

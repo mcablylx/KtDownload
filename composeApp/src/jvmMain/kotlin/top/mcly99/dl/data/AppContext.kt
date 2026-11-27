@@ -11,6 +11,9 @@
  */
 package top.mcly99.dl.data
 
+import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.AtomicPropsFile
+import top.mcly99.dl.utils.FilePermissions
 import java.io.File
 import java.util.Properties
 
@@ -32,8 +35,14 @@ class ShimPrefs(private val file: File) {
         synchronized(lock) {
             props.setProperty(key, value)
             runCatching {
-                file.parentFile?.mkdirs()
-                file.outputStream().use { props.store(it, "KtDownload / YunX resolver preferences") }
+                val path = file.toPath()
+                path.parent?.let { FilePermissions.hardenDirectory(it) }
+                // P3-05：旧实现直接 outputStream 覆盖，进程被杀会留下半截 properties；
+                // 复用 P1-06 的原子写（唯一 tmp + ATOMIC_MOVE + 回退），写完再收紧权限。
+                AtomicPropsFile.write(path, props, "KtDownload / YunX resolver preferences")
+                FilePermissions.hardenFile(path)
+            }.onFailure { e ->
+                AppLogger.warn("ShimPrefs", "写入 ${file.name} 失败: ${e.message}", e)
             }
         }
     }
