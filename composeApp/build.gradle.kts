@@ -23,6 +23,14 @@ plugins {
     alias(libs.plugins.vlcSetup)
 }
 
+// P3-04：依赖锁定基础设施。KMP + Compose 的可解析配置很多，先接入基础设施但不强制
+// `--locked-mode`（强推 lockfile 的维护成本高于当前收益）；需要时用
+// `./gradlew :composeApp:dependencies --write-locks` 生成锁定文件。
+// PR 侧的漏洞 / 许可证门禁在 ci.yml 的 dependency-review job。
+dependencyLocking {
+    lockAllConfigurations()
+}
+
 // JCEF 的 CefBrowserWindowMac.getWindowHandle() 连续引用五个 JDK 内部类，分属三个包：
 //   sun.awt.AWTAccessor、sun.lwawt.LWComponentPeer / PlatformWindow、
 //   sun.lwawt.macosx.CFRetainedResource / CPlatformWindow。

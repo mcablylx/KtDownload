@@ -6,7 +6,7 @@ name: CI
 #     assumption 跳过，属预期差异；三个平台首次远端实测若暴露平台特有问题，按日志单独修。
 #   - 冒烟 / 集成用例不在此任务内：P2-29 已拆到 opt-in 的 :composeApp:integrationTest，
 #     所以这里的绿灯只代表「纯 JVM 单测」，不再把零覆盖的 CDP/JCEF/VLC/ffmpeg 计入。
-#   - 4 个 action 全部 pin 到 commit SHA（防上游 tag 被移动），注释保留对应版本便于升级。
+#   - 所有 action 全部 pin 到 commit SHA（防上游 tag 被移动），注释保留对应版本便于升级。
 #   - --no-daemon：一次性 CI 构建不需要常驻守护进程；shell: bash 让 windows-latest
 #     也走 Git Bash，三平台共用同一条命令。
 
@@ -97,3 +97,17 @@ jobs:
               with open(out, "a", encoding="utf-8") as fh:
                   fh.write(text)
           PY
+
+  # P3-04：依赖漏洞 / 许可证门禁。PR 才触发（push / dispatch 没有 PR diff，检查无意义）。
+  # 依赖变化取自仓库启用的 GitHub Dependency Graph；发现中危及以上漏洞或禁用许可证即失败。
+  dependency-review:
+    name: Dependency review (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
