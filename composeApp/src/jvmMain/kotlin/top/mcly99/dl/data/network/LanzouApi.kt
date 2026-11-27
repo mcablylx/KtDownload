@@ -19,10 +19,76 @@ import okhttp3.CookieJar
 import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
+
+/** 登录中转跳转上限：防止异常重定向链死循环（P2-13） */
+private const val MAX_LANZOU_LOGIN_REDIRECTS = 8
+
+/** 登录链路的安全策略违规：不能被「中转页 best-effort」的 runCatching 吞掉（P2-13） */
+internal class LanzouLoginRejected(message: String) : IllegalStateException(message)
+
+/**
+ * 蓝奏云登录链路允许的地址：**https + `woozooo.com` 及其子域**（P2-13）。
+ *
+ * 登录 POST 表单里是明文 password，`msgs` 中转跳转又会带登录 Cookie；一旦目标域放开，
+ * 一个被篡改/被劫持的 302 就能把两者一起送走。这里统一收口，别处不得自行拼 URL。
+ */
+internal fun isTrustedLanzouLoginUrl(url: HttpUrl): Boolean =
+    url.scheme.equals("https", ignoreCase = true) &&
+        (url.host.equals("woozooo.com", ignoreCase = true) ||
+            url.host.endsWith(".woozooo.com", ignoreCase = true))
+
+/**
+ * 解析 3xx 的 `Location`；任何「非 https / 非 woozooo.com / 解析失败」都返回 null（fail closed）。
+ * 相对路径、`//host/path` 形式由 OkHttp 的 `HttpUrl.resolve` 按当前 URL 补全。
+ */
+internal fun resolveTrustedLanzouRedirect(current: HttpUrl, location: String): HttpUrl? =
+    runCatching { current.resolve(location) }.getOrNull()?.takeIf(::isTrustedLanzouLoginUrl)
+
+/**
+ * 登录链路专用 Cookie 罐（P2-13）。
+ *
+ * 旧实现 `loadForRequest` 把某 host 收到的**全部** Cookie 用 `domain(url.host)` 重建后回传，
+ * 既没有 `secure` 也没有域校验：配合 `followSslRedirects(true)`，一个 https→http 的跳转
+ * 就会让 `ylogin` / `phpdisk_info` 走明文；跳到别的 https 域名也会照样带上。
+ * 现在只在「https + woozooo.com 子域」回传，且给 Cookie 打上 `secure` / `httpOnly`。
+ */
+class LanzouLoginCookieJar : CookieJar {
+    private val jar = ConcurrentHashMap<String, MutableMap<String, String>>()
+
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        if (!isTrustedLanzouLoginUrl(url)) return
+        val bucket = jar.getOrPut(url.host) { ConcurrentHashMap() }
+        cookies.forEach { c -> bucket[c.name] = c.value }
+    }
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        if (!isTrustedLanzouLoginUrl(url)) return emptyList()
+        return jar[url.host]?.map { (k, v) ->
+            Cookie.Builder()
+                .domain(url.host)
+                .path("/")
+                .name(k)
+                .value(v)
+                .secure()
+                .httpOnly()
+                .build()
+        } ?: emptyList()
+    }
+
+    /** 网页 JS 校验算出的 `acw_sc__v2` 与 Set-Cookie 走同一张罐子 */
+    fun put(host: String, name: String, value: String) {
+        if (host.isBlank()) return
+        jar.getOrPut(host) { ConcurrentHashMap() }[name] = value
+    }
+
+    fun snapshot(host: String): Map<String, String> = jar[host]?.toMap().orEmpty()
+}
 
 /** 个人盘登录态参数（从 mydisk.php 提取）。 */
 data class LanzouLoginParams(val uid: String, val vei: String)
@@ -112,25 +178,21 @@ class LanzouApi(
      * 3) 返回 `ylogin=..; ylogins=..; uag=..; phpdisk_info=..; lanzou_ifo=..`。
      * 失败抛 IllegalStateException（服务端 msg，如「密码错误」「用户名不正确」）。
      */
-    suspend fun login(account: String, password: String): String = withContext(Dispatchers.IO) {
+    suspend fun login(
+        account: String,
+        password: String,
+        /** 可注入的 Cookie 罐：默认新建；单测可预置登录 Cookie 跑完整链路（P2-13） */
+        jar: LanzouLoginCookieJar = LanzouLoginCookieJar(),
+    ): String = withContext(Dispatchers.IO) {
         val name = account.trim()
         if (name.isEmpty() || password.isEmpty()) throw IllegalStateException("请输入蓝奏云账号和密码")
-        val jar = java.util.concurrent.ConcurrentHashMap<String, MutableMap<String, String>>()
+        // P2-13：登录链路一律不跟随自动重定向。密码 POST 彻底不跟；msgs 由
+        // followTrustedLoginRedirects 手动跟，每一跳都先过 isTrustedLanzouLoginUrl。
+        // followSslRedirects(false) 再兜一层：即便将来有人改回自动跟随，也禁止 https→http。
         val loginClient = client.newBuilder()
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .cookieJar(object : CookieJar {
-                override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-                    cookies.forEach { c ->
-                        jar.getOrPut(url.host) { java.util.concurrent.ConcurrentHashMap() }[c.name] = c.value
-                    }
-                }
-
-                override fun loadForRequest(url: HttpUrl): List<Cookie> =
-                    jar[url.host]?.map { (k, v) ->
-                        Cookie.Builder().domain(url.host).path("/").name(k).value(v).build()
-                    } ?: emptyList()
-            })
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .cookieJar(jar)
             .build()
         val headers = Headers.Builder()
             .add("User-Agent", LanzouConstants.WEB_UA)
@@ -148,7 +210,14 @@ class LanzouApi(
                 .build()
             loginClient.newCall(
                 Request.Builder().url(LanzouConstants.ACCOUNTS_URL).headers(headers).post(form).build()
-            ).execute().use { return it.body?.string().orEmpty() }
+            ).execute().use { resp ->
+                // 带明文 password 的 POST 收到 3xx 一律拒绝：OkHttp 在 307/308 下会把
+                // 表单原样重发到 Location，密码就会离开可信域（P2-13）
+                if (resp.code in 300..399) {
+                    throw IllegalStateException("蓝奏云登录被拒绝：登录接口返回了重定向")
+                }
+                return resp.body?.string().orEmpty()
+            }
         }
 
         var body = postLogin()
@@ -156,8 +225,7 @@ class LanzouApi(
         while (attempt < 4 && body.contains("arg1=") && !body.contains("\"zt\"")) {
             val arg1 = LanzouPatterns.ARG1.find(body)?.groupValues?.getOrNull(1)
                 ?: break
-            jar.getOrPut("accounts.woozooo.com") { java.util.concurrent.ConcurrentHashMap() }["acw_sc__v2"] =
-                LanzouCrypto.acwScV2(arg1)
+            jar.put("accounts.woozooo.com", "acw_sc__v2", LanzouCrypto.acwScV2(arg1))
             body = postLogin()
             attempt++
         }
@@ -170,15 +238,19 @@ class LanzouApi(
         }
         val msgs = json.optString("msgs")
         if (msgs.isNotBlank()) {
-            runCatching {
-                loginClient.newCall(
-                    Request.Builder().url(msgs).headers(
-                        Headers.Builder()
-                            .add("User-Agent", LanzouConstants.WEB_UA)
-                            .add("Referer", "${LanzouConstants.ACCOUNTS_ORIGIN}/")
-                            .build()
-                    ).get().build()
-                ).execute().use { it.body?.string() }
+            // msgs 是服务端给的中转鉴权 URL：必须绝对、https、且仍在 woozooo.com 域内
+            val target = runCatching { msgs.toHttpUrl() }.getOrNull()
+                ?: throw IllegalStateException("蓝奏云登录失败：中转地址无效")
+            if (!isTrustedLanzouLoginUrl(target)) {
+                throw IllegalStateException("蓝奏云登录失败：中转地址不在可信域")
+            }
+            try {
+                followTrustedLoginRedirects(loginClient, target)
+            } catch (e: LanzouLoginRejected) {
+                // 安全策略违规必须 fail closed，不能像普通网络异常那样当「中转页没拿到」继续走
+                throw e
+            } catch (_: Exception) {
+                // 中转鉴权页的网络异常保持原来的 best-effort 容忍
             }
             // 再访问一次文件页：获取/固定 PHPSESSID（vei 与该会话绑定，后续 doupload 需同一会话）
             runCatching {
@@ -193,12 +265,38 @@ class LanzouApi(
             }
         }
         // 汇总 pc.woozooo.com 域下全部 Cookie（含 PHPSESSID），与网页登录得到的 Cookie 串等价
-        val pc = jar["pc.woozooo.com"].orEmpty()
+        val pc = jar.snapshot("pc.woozooo.com")
         val cookie = pc.entries.joinToString("; ") { "${it.key}=${it.value}" }
         if (!cookie.contains("ylogin") || !cookie.contains("phpdisk_info")) {
             throw IllegalStateException("蓝奏云登录未获取到有效凭据，请重试")
         }
         cookie
+    }
+
+    /**
+     * 手动跟随登录中转跳转（P2-13）：不用 OkHttp 的自动跟随，每一跳都先过
+     * [resolveTrustedLanzouRedirect]，非 https / 非 woozooo.com 直接 fail closed。
+     *
+     * 登录 Cookie 由 [LanzouLoginCookieJar] 在每跳的 `saveFromResponse` / `loadForRequest`
+     * 之间传递，语义与原来的自动跟随一致，但目标域不再由服务端单方面决定。
+     */
+    private fun followTrustedLoginRedirects(client: OkHttpClient, start: HttpUrl) {
+        var url = start
+        repeat(MAX_LANZOU_LOGIN_REDIRECTS) {
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", LanzouConstants.WEB_UA)
+                .header("Referer", "${LanzouConstants.ACCOUNTS_ORIGIN}/")
+                .get()
+                .build()
+            client.newCall(request).execute().use { resp ->
+                val location = resp.header("Location")
+                if (resp.code !in 300..399 || location == null) return
+                url = resolveTrustedLanzouRedirect(url, location)
+                    ?: throw LanzouLoginRejected("蓝奏云登录被拒绝：跳转目标不在可信域")
+            }
+        }
+        throw LanzouLoginRejected("蓝奏云登录被拒绝：跳转次数过多")
     }
 
     /** 个人盘列目录：文件夹（task=47）+ 文件（task=5）合并。 */

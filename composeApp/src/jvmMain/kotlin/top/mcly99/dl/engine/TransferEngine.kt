@@ -24,6 +24,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStreamWriter
 import java.nio.file.Files
+import java.security.MessageDigest
 
 /** 待发送文件；[remotePath] 是相对发送根的路径（`/` 分隔），接收端据此还原目录结构 */
 data class OutgoingFile(val file: File, val remotePath: String)
@@ -83,6 +84,8 @@ class TransferEngine(
      * 生产由 [top.mcly99.dl.viewmodel.TransferViewModel] 注入 WebUploadServer 的同源 token，
      * 于是 9877 接收与 8080 网页上传由同一枚凭据保护，发送端 sendFiles 自动带 AUTH| 首行，
      * 用户无需手输配对码。注入后旧版发送端（无 AUTH）会被拒绝 —— 这是默认严格的安全取舍。
+     * P2-18：网页上传服务启动/换端口时会轮转令牌，ViewModel 通过
+     * `WebUploadServer.onTokenRotated` 回调把新值同步到这里，两端始终一致。
      */
     @Volatile
     var accessToken: String = ""
@@ -425,7 +428,13 @@ class TransferEngine(
             if (requiredToken.isNotBlank()) {
                 socket.soTimeout = AppConstants.TRANSFER_AUTH_TIMEOUT_MS
                 val authLine = readHeaderLine(bufferedInput)
-                if (authLine == null || authLine != "AUTH|$requiredToken") {
+                // P2-18：与网页上传共用同一枚 128 bit 令牌，比较也统一走常量时间，
+                // 避免接收端留一个比 WebUploadServer 更弱的旁路
+                val expected = "AUTH|$requiredToken".toByteArray(Charsets.UTF_8)
+                if (authLine == null || !MessageDigest.isEqual(
+                        authLine.toByteArray(Charsets.UTF_8), expected
+                    )
+                ) {
                     AppLogger.warn("TransferEngine", "拒绝接收：配对校验未通过（来源 $remoteIp）")
                     return
                 }

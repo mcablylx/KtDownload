@@ -68,6 +68,11 @@ class TransferViewModel {
         // 9877 接收与 8080 网页上传共用同一枚 token；发送端 sendFiles 会自动带 AUTH| 首行
         accessToken = webServer.accessToken
     }
+    init {
+        // P2-18：网页上传令牌在 start() / 换端口时会轮转，接收端必须同步拿到新令牌，
+        // 否则 9877 的 AUTH 校验还认旧值，发送端会被误拒。
+        webServer.onTokenRotated = { engine.accessToken = it }
+    }
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeTransfers = ConcurrentHashMap<String, Job>()

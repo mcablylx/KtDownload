@@ -21,6 +21,9 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.URLDecoder
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
@@ -71,7 +74,8 @@ internal fun bestLocalIp(candidates: List<LocalIpCandidate>): Inet4Address? {
  *
  * 核心功能：
  * - HTTP服务：`GET /` 上传页，`POST /` 接收 multipart/form-data
- * - 访问控制：URL 必须携带 `?token=<accessToken>`，否则返回 403
+ * - 访问控制：URL 必须携带 `?token=<accessToken>`，否则返回 403；令牌 128 bit，
+ *   每次真正启动/换端口都轮转，失败尝试按来源 IP 限速（P2-18）
  * - 流式落盘：以固定缓冲区边读边写，不把请求体整体读入内存
  * - 限制保护：请求体上限、单文件上限、单请求文件数、并发上传数
  * - 资源管理：临时文件失败即清理、线程池随服务器停止而释放
@@ -80,6 +84,7 @@ internal fun bestLocalIp(candidates: List<LocalIpCandidate>): Inet4Address? {
  * @property strings UI字符串资源
  * @property onFileReceived 文件接收完成回调
  * @property accessToken 访问令牌，URL 形如 `http://ip:port/?token=xxx`
+ * @property bindHost 监听地址，默认 `0.0.0.0`（全部网卡）；可指定单张网卡 IP 收窄暴露面
  *
  * @see TransferEngine 局域网传输引擎
  * @see TransferViewModel 传输功能ViewModel
@@ -93,6 +98,13 @@ class WebUploadServer(
      * 测试里压到几百毫秒才能在秒级验证「挂死的连接会被断开」。
      */
     private val idleTimeoutMs: Long = AppConstants.WEB_UPLOAD_IDLE_TIMEOUT_MS,
+    /**
+     * 监听地址。默认 `0.0.0.0` 是「局域网可访问」的前提，不能无条件改掉；
+     * P2-18 把它做成可配置项，需要只暴露到某张网卡时由调用方显式传入该网卡 IP。
+     */
+    private val bindHost: String = "0.0.0.0",
+    /** 单调时钟（毫秒），失败限速的窗口判定用；单测可注入假时钟 */
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     var strings: UiStrings = zhCN()
     var onFileReceived: (File) -> Unit = {}
@@ -110,9 +122,29 @@ class WebUploadServer(
     var port: Int = AppConstants.DEFAULT_WEB_PORT
         private set
 
-    /** 访问令牌：浏览器必须带上 ?token=xxx */
+    /**
+     * 访问令牌：浏览器必须带上 `?token=xxx`。
+     *
+     * P2-18：原来是 `UUID` 前 16 hex = **64 bit**，且进程生命周期内不轮转；
+     * 现在改为 128 bit `SecureRandom`，每次真正启动 / 换端口都生成新的一枚。
+     * setter 收成私有，外部只能经 [rotateAccessToken] 轮转，避免又退回弱令牌。
+     */
     @Volatile
     var accessToken: String = randomToken()
+        private set
+
+    /** 令牌轮转回调：让 9877 接收端与 8080 网页上传始终用同一枚凭据（P2-18） */
+    @Volatile
+    var onTokenRotated: (String) -> Unit = {}
+
+    /** 失败尝试按来源 IP 记录的滑动窗口状态 */
+    private val tokenFailures = ConcurrentHashMap<String, TokenFailure>()
+
+    private class TokenFailure(
+        @Volatile var count: Int,
+        @Volatile var windowStartMs: Long,
+        @Volatile var blockedUntilMs: Long,
+    )
 
     /** 同时进行的上传请求上限 */
     private val uploadSlots = Semaphore(AppConstants.MAX_CONCURRENT_UPLOADS)
@@ -120,6 +152,16 @@ class WebUploadServer(
     val isRunning: Boolean get() = server != null
 
     companion object {
+        private const val TOKEN_BYTES = 16                       // 128 bit
+        /** 单个来源 IP 在一个窗口内允许的失败次数 */
+        internal const val MAX_TOKEN_FAILURES = 5
+        internal const val TOKEN_FAILURE_WINDOW_MS = 60_000L
+        internal const val TOKEN_LOCKOUT_MS = 60_000L
+        /** 失败记录按来源 IP 计数，上限防止 0.0.0.0 暴露时被大量来源撑大内存 */
+        private const val MAX_TRACKED_FAILURE_IPS = 256
+
+        private val TOKEN_RANDOM = SecureRandom()
+
         private val ILLEGAL_NAME_CHARS = charArrayOf('<', '>', ':', '"', '/', '\\', '|', '?', '*', '\u0000')
         private val WINDOWS_RESERVED_NAMES = setOf(
             "CON", "PRN", "AUX", "NUL",
@@ -127,8 +169,57 @@ class WebUploadServer(
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
         )
 
-        private fun randomToken(): String =
-            java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+        /** 128 bit 随机令牌（32 位小写 hex）。用 `SecureRandom`，不用 UUID 的时间/版本位。 */
+        private fun randomToken(): String {
+            val bytes = ByteArray(TOKEN_BYTES)
+            TOKEN_RANDOM.nextBytes(bytes)
+            return buildString(TOKEN_BYTES * 2) {
+                for (b in bytes) {
+                    val v = b.toInt() and 0xff
+                    append(Character.forDigit(v ushr 4, 16))
+                    append(Character.forDigit(v and 0x0f, 16))
+                }
+            }
+        }
+    }
+
+    /** 生成并启用一枚新令牌，同时通知接收端同步。返回新令牌。 */
+    fun rotateAccessToken(): String {
+        val fresh = randomToken()
+        accessToken = fresh
+        // 旧令牌立刻失效，历史失败计数也一起作废，避免旧状态误伤新令牌的合法请求
+        tokenFailures.clear()
+        onTokenRotated(fresh)
+        return fresh
+    }
+
+    /** 失败尝试限速：返回剩余锁定毫秒（0 = 未锁定）。 */
+    private fun failureLockRemaining(ip: String, now: Long): Long {
+        val state = tokenFailures[ip] ?: return 0L
+        return (state.blockedUntilMs - now).coerceAtLeast(0L)
+    }
+
+    private fun noteTokenFailure(ip: String, now: Long) {
+        if (tokenFailures.size > MAX_TRACKED_FAILURE_IPS) {
+            tokenFailures.entries.removeAll { (_, s) ->
+                s.blockedUntilMs <= now && now - s.windowStartMs >= TOKEN_FAILURE_WINDOW_MS
+            }
+        }
+        // compute 对该 key 持锁，窗口重置 / 计数 / 置锁定都是一个原子步骤
+        tokenFailures.compute(ip) { _, existing ->
+            val s = existing ?: TokenFailure(0, now, 0L)
+            if (now - s.windowStartMs >= TOKEN_FAILURE_WINDOW_MS) {
+                s.count = 0
+                s.windowStartMs = now
+            }
+            s.count++
+            if (s.count >= MAX_TOKEN_FAILURES) {
+                s.blockedUntilMs = now + TOKEN_LOCKOUT_MS
+                s.count = 0
+                s.windowStartMs = now
+            }
+            s
+        }
     }
 
     /** 内部：请求被拒绝（4xx） */
@@ -158,7 +249,11 @@ class WebUploadServer(
         var pool: ExecutorService? = null
         return try {
             created = HttpServer.create()
-            created.bind(InetSocketAddress(listenPort), 0)
+            created.bind(
+                if (bindHost.isBlank() || bindHost == "0.0.0.0") InetSocketAddress(listenPort)
+                else InetSocketAddress(bindHost, listenPort),
+                0,
+            )
             created.createContext("/") { exchange ->
                 try {
                     when (exchange.requestMethod) {
@@ -173,6 +268,9 @@ class WebUploadServer(
             }
             pool = Executors.newFixedThreadPool(4)
             created.executor = pool
+            // 每次真正启动 / 换端口都轮转令牌：旧地址（含已打开的上传页）立即失效。
+            // 必须在 start() 之前，避免新服务有一瞬间还在吃旧令牌。
+            rotateAccessToken()
             created.start()
             ensureWatchdog()
 
@@ -186,7 +284,7 @@ class WebUploadServer(
                 AppLogger.info("WebUpload", "端口切换完成，关闭旧服务")
                 shutdown(previousServer, previousPool)
             }
-            AppLogger.info("WebUpload", "服务已启动: 0.0.0.0:$port (本机 IP: ${getLocalIp()})")
+            AppLogger.info("WebUpload", "服务已启动: $bindHost:$port (本机 IP: ${getLocalIp()})")
             true
         } catch (e: Exception) {
             AppLogger.warn("WebUpload", "启动失败，端口 $listenPort: ${e.message}", e)
@@ -206,6 +304,7 @@ class WebUploadServer(
         watchdog?.shutdownNow()
         watchdog = null
         activeUploads.clear()
+        tokenFailures.clear()
         AppLogger.info("WebUpload", "服务已停止")
     }
 
@@ -319,10 +418,30 @@ class WebUploadServer(
     private fun decode(s: String): String =
         runCatching { URLDecoder.decode(s.replace("+", " "), "UTF-8") }.getOrDefault(s)
 
-    /** 校验访问令牌；失败时已写出 403 响应 */
+    /** 校验访问令牌；失败时已写出 403 / 429 响应 */
     private fun checkToken(exchange: HttpExchange): Boolean {
-        val supplied = queryParams(exchange.requestURI.rawQuery)["token"]
-        if (supplied != null && supplied == accessToken) return true
+        val supplied = queryParams(exchange.requestURI.rawQuery)["token"].orEmpty()
+        val ip = runCatching { exchange.remoteAddress?.address?.hostAddress }
+            .getOrNull().orEmpty().ifBlank { "unknown" }
+        val now = clock()
+        val lockMs = failureLockRemaining(ip, now)
+        if (lockMs > 0) {
+            exchange.responseHeaders.add("Retry-After", ((lockMs + 999) / 1000).toString())
+            respondJson(exchange, 429, "{\"success\":false,\"error\":\"too_many_attempts\"}")
+            return false
+        }
+        // P2-18：常量时间比较（令牌定长，长度差异不泄漏内容）；
+        // 用 orEmpty() 把「没带 token」和「带错 token」走同一条比较路径，不要提前 return。
+        if (MessageDigest.isEqual(
+                supplied.toByteArray(Charsets.UTF_8),
+                accessToken.toByteArray(Charsets.UTF_8),
+            )
+        ) {
+            // 认证成功即清掉该来源的历史失败，避免用户输错一次旧地址后连正确地址都用不了
+            tokenFailures.remove(ip)
+            return true
+        }
+        noteTokenFailure(ip, now)
         respondJson(exchange, 403, "{\"success\":false,\"error\":\"forbidden\"}")
         return false
     }
@@ -332,6 +451,8 @@ class WebUploadServer(
         val bytes = buildUploadPage().toByteArray(Charsets.UTF_8)
         exchange.responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
         exchange.responseHeaders.add("Cache-Control", "no-store")
+        // 令牌在 URL query 里：禁止把它当 Referer 发给页面内可能加载的任何资源（P2-18）
+        exchange.responseHeaders.add("Referrer-Policy", "no-referrer")
         exchange.sendResponseHeaders(200, bytes.size.toLong())
         exchange.responseBody.use { it.write(bytes) }
     }
