@@ -1,6 +1,8 @@
 @echo off
 setlocal
 
+REM Set CI=1 in automation to skip the interactive pauses below (P2-30).
+
 REM Prefer an installed WiX 3.x over the bundled 3.11 copy: some Windows
 REM environments reject the bundled tool's temp-directory ACL creation.
 if not defined WIX_PATH (
@@ -49,7 +51,7 @@ echo Cleaning old build...
 call "%~dp0gradlew.bat" clean
 if errorlevel 1 (
     echo Clean failed!
-    pause
+    if not defined CI pause
     exit /b 1
 )
 
@@ -58,7 +60,7 @@ echo Fetching bundled FFmpeg (pinned version, SHA-256 verified)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\fetch-ffmpeg.ps1"
 if errorlevel 1 (
     echo FFmpeg download failed!
-    pause
+    if not defined CI pause
     exit /b 1
 )
 
@@ -67,7 +69,7 @@ echo Packaging application (may take a few minutes)...
 call "%~dp0gradlew.bat" composeApp:packageReleaseDistributionForCurrentOS
 if errorlevel 1 (
     echo Packaging failed!
-    pause
+    if not defined CI pause
     exit /b 1
 )
 
@@ -89,5 +91,5 @@ echo - Start menu shortcut: KtDownload
 echo - Desktop shortcut: enabled by jpackage shortcut = true
 echo.
 
-pause
+if not defined CI pause
 endlocal

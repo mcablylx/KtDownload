@@ -1,6 +1,6 @@
 # KtDownload 使用与开发说明
 
-> 当前版本：**1.0.3**  
+> 当前版本：**1.0.3**（发版时需与 `gradle.properties` 的 `appVersion` 同步；应用内版本由构建期生成的 `APP_VERSION` 注入，见 `composeApp/build.gradle.kts` 的 `generateVersionFile`）  
 > 工程名称：`KtDownload`  
 > 应用名称：KtDownload  
 > 开源协议：**GNU Affero General Public License v3.0（AGPL-3.0）**  
@@ -162,7 +162,7 @@ YunX-Desktop 使用 **AGPL-3.0** 协议。由于 AGPL-3.0 的代码以源码形�
 | Gradle | 使用仓库内的 Gradle Wrapper（8.14.5） |
 | 操作系统 | Windows 10/11 x64、macOS 10.15+、Linux 桌面 |
 | 内存 | 建议 4 GB 以上，构建 JVM 参数 `-Xmx3072M` |
-| 网络 | 首次构建需访问 Google Maven / Maven Central；打包还需下载 libvlc、UPX 与 FFmpeg（均可预先离线预置，见下） |
+| 网络 | 首次构建需访问 Google Maven / Maven Central；打包还需 libvlc、UPX 与 FFmpeg（可预置到 `~/.gradle/vlcSetup/` 离线使用；macOS 归档需仓库实际包含 `third-party/binaries/`，见下） |
 
 > 若 IDE 报 Gradle JVM 版本不兼容，请在 IDE 的 Gradle 设置中选择 JDK 21。命令行构建使用仓库固定的 21 守护进程配置。
 
@@ -211,7 +211,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-ffmpeg.ps1
 
 单个包也可通过 `KTDOWNLOAD_FFMPEG_ZIP` 环境变量单独指定。若需更新 FFmpeg 版本，必须同时更新脚本里的 `$AssetName`、`$ExpectedSha256` 以及 `third-party/ffmpeg/SOURCE.txt`。
 
-macOS 打包需在本机用 `scripts/fetch-ffmpeg-macos.sh` 编译 FFmpeg 并完成 ad-hoc 签名。
+macOS 打包由 `scripts/fetch-ffmpeg-macos.sh` 准备 FFmpeg：仓库预置归档存在且 SHA-256 校验通过时直接还原（universal 二进制，无需现场编译），否则回退到官方源码包下载编译；`composeApp/build.gradle.kts` 在打包阶段对 `.app` 及其内部二进制做 ad-hoc 签名。真实 Developer ID 签名 + 公证见 `scripts/notarize-macos.sh`（P2-24）。
 
 > **release 构建关闭了代码裁剪（ProGuard / R8 shrink）**，见 `composeApp/build.gradle.kts` 的 `buildTypes.release.proguard`。
 > JCEF、vlcj、JNA 等原生桥接库靠**类名字符串反射**实例化回调类，静态分析看不到引用；一旦裁剪，
@@ -220,7 +220,7 @@ macOS 打包需在本机用 `scripts/fetch-ffmpeg-macos.sh` 编译 FFmpeg 并完
 
 ### 离线打包（无需下载 FFmpeg / libvlc）
 
-仓库的 `third-party/binaries/` 随附了**校验过 SHA-256 的预置二进制**（macOS 版 FFmpeg 为 universal，同时支持 Intel 与 Apple Silicon；libvlc 为 universal 3.0.21）。clone 后直接打包即可，全程不联网、不现场编译：
+离线打包依赖 `third-party/binaries/` 下**校验过 SHA-256 的预置归档**（macOS 版 FFmpeg 为 universal，同时支持 Intel 与 Apple Silicon；libvlc 为 universal 3.0.21）。**默认 clone 不一定包含这些大文件**——本仓库的 sparse-checkout 排除了该目录，走查时该目录甚至不存在；请先 `ls third-party/binaries/` 确认归档齐全（清单与 SHA 见 `third-party/binaries/SOURCE.txt`）。只有在归档齐全时，下面这条路径才成立「全程不联网、不现场编译」：
 
 ```bash
 git clone <repo-url>
@@ -235,7 +235,7 @@ bash package-macos.sh
 
 预置文件缺失或损坏时，脚本会自动回退到原来的联网下载/源码编译路径（`--force` 可强制走源码编译）。因此网络良好的环境行为与之前完全一致。
 
-> Windows / Linux 目前仍需联网获取 FFmpeg 与 libvlc（版本已锁定并带 SHA 校验），仅 macOS 提供离线预置包。升级任一二进制版本时，必须同步更新 `third-party/binaries/SOURCE.txt` 中记录的版本与 SHA，以及脚本/构建文件中的对应常量。
+> Windows / Linux 目前仍需联网获取 FFmpeg 与 libvlc，仅 macOS 提供离线预置包。FFmpeg 二进制由 `scripts/fetch-ffmpeg.ps1` 强制做 SHA-256 校验；**联网下载的 libvlc 归档默认没有内置期望 SHA**，`verifyVlcArchive` 会在打包前明确告警「本次未校验」，可用 `-PvlcArchiveSha256=<sha256>` 注入（或把归档与其 SHA 补进 `third-party/binaries/`）。升级任一二进制版本时，必须同步更新 `third-party/binaries/SOURCE.txt`、`build.gradle.kts` 的版本/SHA 常量与 `fetch-ffmpeg*` 脚本（P2-25）。
 
 ---
 
@@ -332,11 +332,11 @@ KtDownload/
 │       └── jvmTest/                 # JVM 单元测试与集成测试
 ├── resources/                       # 各平台 FFmpeg / libvlc 资源与许可
 ├── third-party/
-│   ├── binaries/                    # 离线打包用预置二进制（universal FFmpeg + libvlc，含 SOURCE.txt）
+│   ├── binaries/                    # 离线打包预置归档清单（SOURCE.txt；大文件默认不被 sparse-checkout 拉取）
 │   ├── ffmpeg/                      # FFmpeg 版本与来源说明
 │   └── yunx-desktop/                # 上游 AGPL 许可与移植来源清单
 ├── scripts/                         # FFmpeg 获取与打包辅助脚本
-├── .github/workflows/               # 三平台 CI
+├── .github/workflows/               # 三平台单测 CI（ci.yml）+ tag 触发的 draft 发布流程（release.yml）
 ├── README.md                        # 本文档
 ├── THIRD-PARTY-NOTICES.md           # 第三方组件与许可声明
 ├── LICENSE                          # AGPL-3.0 全文
@@ -349,7 +349,7 @@ KtDownload/
 
 1. 不支持 BT：`magnet:` 与 `.torrent` 会在 UI 与引擎两层被拒绝。
 2. HLS 不支持直播流、SAMPLE-AES、DRM `KEYFORMAT`、加密的 `#EXT-X-MAP` 与多个不同初始化段；分片、播放列表大小与数量均有上限。
-3. macOS 内置 FFmpeg 目前主要覆盖 Intel x86_64；Apple 芯片可经 Rosetta 或自行指定 FFmpeg 路径。
+3. macOS 内置 FFmpeg 为 universal 二进制（Intel x86_64 与 Apple Silicon 均可原生运行）；若预置归档缺失、脚本回退到本机源码编译，则只覆盖当前编译机架构，需自行指定 FFmpeg 路径。
 4. 抓网页默认不执行 JavaScript；深度抓取依赖本机 Chrome / Edge，且 `blob:`（MSE）地址、登录态播放内核的 Cookie 仍有边界。
 5. 在线观看不支持 DRM；高码率 4K 播放会吃力；播放器随包增加约 46 MB 体积。
 6. 单线程续传依赖本地文件长度，服务器忽略 Range 时会从头写入。

@@ -108,8 +108,53 @@ kotlin {
 
 // JDK 默认丢弃 `Origin` 等受限请求头（见 main.kt 的同名设置）。测试里要在
 // HttpURLConnection 类初始化之前生效，只能靠 JVM 启动参数，不能靠代码里 setProperty。
+// P2-29：把「需要真机 / 真实二进制」的冒烟用例从 jvmTest 里摘出去。
+// 这些用例在环境变量缺失时提前 return 静默「通过」，却被计入 jvmTest 绿灯，
+// 让 CDP / JCEF / VLC / HLS 真实转封装零覆盖仍显示 0 失败、0 跳过（走查 P2-29）。
+// JUnit4 没有 @Tag，且混合类里含真单测，所以清单按「类名 + 方法名」显式列出；
+// 两个任务共用同一份常量，避免以后只改一处造成漏跑或双跑。
+val integrationTestPatterns = listOf(
+    // 整个类都是冒烟：分别需要本机 Chrome/CDP、libvlc + 图形栈
+    "*BrowserCaptureSmokeTest",
+    "*VlcPlaybackSmokeTest",
+    // 混合类：其余方法是不依赖外部进程的真单测，必须留在 jvmTest
+    "*JcefHolderTest.starts_the_embedded_browser_on_this_machine",
+    "*FfmpegMuxerTest.real_ffmpeg_muxes_ts_segments_to_playable_mp4",
+    "*FfmpegMuxerTest.real_ffmpeg_muxes_video_with_separate_audio_track",
+)
+
 tasks.named<Test>("jvmTest") {
     systemProperty("sun.net.http.allowRestrictedHeaders", "true")
+    // 单元测试 = 纯 JVM，无浏览器 / 图形栈 / 外部二进制依赖，任何平台都应全绿
+    filter {
+        integrationTestPatterns.forEach { pattern -> excludeTestsMatching(pattern) }
+    }
+}
+
+// 与 jvmTest 共用同一套编译输出，仅换 filter。默认不执行、也不挂到 check：
+//   KTDL_RUN_INTEGRATION=1 ./gradlew :composeApp:integrationTest --no-configuration-cache
+// 用例本身还要求 KTDL_CDP_SMOKE / KTDL_VLC_SMOKE / MCLY_JCEF_SMOKE=1 与本机 ffmpeg；
+// 没设这些变量的用例会自行跳过，因此这里的「通过」不代表对应链路已覆盖。
+val jvmTestTask = tasks.named<Test>("jvmTest")
+val integrationTest by tasks.registering(Test::class) {
+    group = "verification"
+    description = "Opt-in smoke/integration tests (CDP browser, JCEF, VLC, real ffmpeg). Not part of check."
+    testClassesDirs = jvmTestTask.get().testClassesDirs
+    classpath = jvmTestTask.get().classpath
+    systemProperty("sun.net.http.allowRestrictedHeaders", "true")
+    filter {
+        integrationTestPatterns.forEach { pattern -> includeTestsMatching(pattern) }
+    }
+    val enabled = providers.environmentVariable("KTDL_RUN_INTEGRATION")
+        .map { it == "1" }.getOrElse(false)
+    onlyIf("需要显式设置 KTDL_RUN_INTEGRATION=1") { enabled }
+    doFirst {
+        logger.lifecycle(
+            "integrationTest：冒烟用例需要真实 Chrome/CDP、JCEF natives、libvlc 与 ffmpeg；" +
+                "未设置对应 *_SMOKE=1 的用例会自行跳过，通过不代表这些链路已覆盖。"
+        )
+    }
+    shouldRunAfter(jvmTestTask)
 }
 
 // 生成版本号文件任务（使用 layout.buildDirectory，兼容 Gradle 9）
@@ -279,12 +324,25 @@ val bundledVlcSha256 = when (vlcArchiveName) {
     "vlc-$vlcBundleVersion.dmg" -> "50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0"
     else -> null
 }
+
+// P2-25：Windows / Linux 的归档是联网下载的，仓库里没有对应文件，也就没有内置 SHA。
+// 不硬编一个未知值（那会让所有 Windows/Linux 打包必然校验失败），而是开放一条
+// 数据驱动通道：-PvlcArchiveSha256=<sha256> 注入期望值；没注入时下面的校验任务
+// 会明确告警「本次未校验」，而不是像以前那样静默跳过。
+// macOS 仍用仓库预置包的内置值，行为不变。
+val vlcExpectedSha256: String? = providers.gradleProperty("vlcArchiveSha256")
+    .orElse(bundledVlcSha256.orEmpty())
+    .orNull
+    ?.takeIf { it.isNotBlank() }
 val restoreVlcFromRepo by tasks.registering {
+    // doLast 里引用了脚本作用域的 logger，configuration cache 无法序列化；
+    // 与下方 vlc-* 任务同样标记（打包链路本来就会因 vlc-setup 退化为不用缓存）。
+    notCompatibleWithConfigurationCache("自定义任务在 doLast 中引用 Gradle script 对象")
     group = "compose desktop"
     description = "Restore the pinned libvlc archive from third-party/binaries/ into the gradle cache"
     val cacheFile = vlcSetupCacheDir.resolve(vlcArchiveName)
     val repoFile = bundledVlcArchive.asFile
-    val expectedSha = bundledVlcSha256
+    val expectedSha = vlcExpectedSha256
     onlyIf("缓存中尚无 $vlcArchiveName 且仓库含预置归档") {
         !cacheFile.isFile && repoFile.isFile
     }
@@ -356,10 +414,56 @@ val vlcPlatformDir = when {
 // resources/windows 是 vlcSetup 的输出目录，动它会让 Gradle 判定 vlcSetup 过期，
 // 于是每次构建都要重新解压+压缩一遍（约 5 分钟）。开发期（gradlew run）直接用
 // resources/ 下的完整插件集，只是大一点，功能一致。
+// P2-25：联网下载的 libvlc 归档原先完全没有 SHA 校验（vlc-setup 插件下载后直接解压）。
+// 这里在「资源就绪 → 打包」之间对最终落到 gradle 缓存的归档做一次校验：
+//   - 有期望 SHA（macOS 内置预置包 / -PvlcArchiveSha256=...）→ 不匹配直接让构建失败；
+//   - 没有期望 SHA → 明确告警「本次未校验」，不再静默跳过。
+// 挂在 prepareAppResources 之后、pruneBundledVlc 之前，保证下载/还原已经完成，
+// 且损坏或被替换的归档不会进入安装包。
+val verifyVlcArchive by tasks.registering {
+    notCompatibleWithConfigurationCache("自定义任务在 doLast 中引用 Gradle script 对象")
+    group = "compose desktop"
+    description = "Verify the libvlc archive SHA-256 before it is bundled (P2-25)"
+    dependsOn("prepareAppResources")
+    val archive = vlcSetupCacheDir.resolve(vlcArchiveName)
+    val expected = vlcExpectedSha256
+    inputs.file(archive).optional()
+    inputs.property("expectedSha256", expected ?: "<none>")
+    doLast {
+        if (!archive.isFile) {
+            logger.warn("P2-25: 未找到 libvlc 归档 $archive，跳过 SHA-256 校验（本次打包可能复用了已解压产物）。")
+            return@doLast
+        }
+        if (expected == null) {
+            logger.warn(
+                "P2-25: $vlcArchiveName 未配置 SHA-256，本次未校验归档完整性。" +
+                    "联网下载存在被篡改 / 截断风险；可用 -PvlcArchiveSha256=<sha256> 注入期望值，" +
+                    "或把归档与其 SHA 登记到 third-party/binaries/SOURCE.txt。"
+            )
+            return@doLast
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        archive.inputStream().use { input ->
+            val buf = ByteArray(8192)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        val actual = digest.digest().joinToString("") { b -> "%02x".format(b) }
+        check(actual.equals(expected, ignoreCase = true)) {
+            "libvlc 归档 SHA-256 不匹配：$archive 期望 $expected，实际 $actual。请重新获取该文件。"
+        }
+        logger.lifecycle("P2-25: $vlcArchiveName SHA-256 校验通过")
+    }
+}
+
 val pruneBundledVlc by tasks.registering {
     group = "compose desktop"
     description = "删除打包副本里与播放无关的 libvlc 插件（界面/可视化/推流/媒体库）"
     dependsOn("prepareAppResources")
+    dependsOn(verifyVlcArchive)
     val stagedDir = layout.buildDirectory.dir("compose/tmp/prepareAppResources")
     val patterns = bundledVlcPrunePatterns
     // 用 doLast 直接删：Delete 任务接不住「Provider<FileTree>」形式的目标，
@@ -386,14 +490,27 @@ tasks.matching { it.name == "runDistributable" }.configureEach {
 }
 
 // macOS 的 .app（含随包 ffmpeg）必须带签名，Apple Silicon 与 Rosetta 才肯执行。
-// 无开发者证书时用 ad-hoc 签名（-s -）；在 jpackage 生成 .app 后、打包 DMG/PKG 之前执行，
-// 因此 DMG/PKG 内的应用也带签名。真实证书签名仍走 macOS.signing 配置。
+// 默认仍是 ad-hoc 签名（-s -），无开发者证书的环境行为完全不变。
+// P2-24：开发者可用 -PmacosSignIdentity="Developer ID Application: ..." 切换为真实签名，
+// 此时补 --options runtime（notarytool 要求 hardened runtime）与 --timestamp（安全时间戳）。
+// DMG/PKG 容器签名与公证不放在 Gradle 里（需要 Apple 凭证），见 scripts/notarize-macos.sh。
+val macSignIdentity: String = providers.gradleProperty("macosSignIdentity").getOrElse("-")
+val macDeveloperIdSigning: Boolean = macSignIdentity != "-"
 if (System.getProperty("os.name").startsWith("Mac")) {
+    val extraCodesignArgs =
+        if (macDeveloperIdSigning) listOf("--options", "runtime", "--timestamp") else emptyList()
     tasks.withType<AbstractJPackageTask>().configureEach {
         if (targetFormat == TargetFormat.AppImage) {
             doLast {
                 fun run(vararg command: String) =
                     ProcessBuilder(*command).inheritIO().start().waitFor()
+                fun sign(path: String, deep: Boolean = false) {
+                    val args = mutableListOf("codesign", "--force")
+                    args.addAll(extraCodesignArgs)
+                    if (deep) args.add("--deep")
+                    args.addAll(listOf("--sign", macSignIdentity, path))
+                    check(run(*args.toTypedArray()) == 0) { "codesign failed: $path" }
+                }
 
                 val appDir = destinationDir.get().asFile.resolve("${packageName.get()}.app")
                 if (appDir.isDirectory) {
@@ -405,23 +522,15 @@ if (System.getProperty("os.name").startsWith("Mac")) {
                         bundledFfmpeg.setExecutable(true, false)
                         // --deep 不会给 Resources 里的独立可执行文件补签名（实测 app 目录内仍是未签名），
                         // 而 Apple Silicon 要求所有二进制都有签名，所以单独签一次。
-                        check(run("codesign", "--force", "--sign", "-", bundledFfmpeg.absolutePath) == 0) {
-                            "ad-hoc codesign failed: $bundledFfmpeg"
-                        }
+                        sign(bundledFfmpeg.absolutePath)
                     }
                     // 随包 libvlc 的 dylib（含 plugins/）同样是 Resources 下的独立 Mach-O，
                     // `--deep` 不会覆盖它们；不逐个签，arm64 上加载会被内核拒绝
                     // （x86_64 走 Rosetta 暂时侥幸能跑）。v9 修复，见 docs/IMPROVEMENTS.md。
                     appResources.walkTopDown()
                         .filter { it.isFile && it.extension == "dylib" }
-                        .forEach { dylib ->
-                            check(run("codesign", "--force", "--sign", "-", dylib.absolutePath) == 0) {
-                                "ad-hoc codesign failed: $dylib"
-                            }
-                        }
-                    check(run("codesign", "--force", "--deep", "--sign", "-", appDir.absolutePath) == 0) {
-                        "ad-hoc codesign failed: $appDir"
-                    }
+                        .forEach { dylib -> sign(dylib.absolutePath) }
+                    sign(appDir.absolutePath, deep = true)
                 }
             }
         }
