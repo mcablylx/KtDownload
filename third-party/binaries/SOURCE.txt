@@ -6,6 +6,12 @@ clone the repo and build an installer WITHOUT downloading FFmpeg or libvlc
 from the network. The packaging scripts restore these into the locations the
 build expects, verifying SHA-256 before use.
 
+> NOTE (P2-25, 2026-11-27): this repository uses sparse-checkout with
+> `!/third-party/binaries/`, so a normal clone does NOT check out this directory.
+> The promise "clone and package fully offline" only holds once the archives
+> listed below are actually present. The Chinese section at the end documents
+> the current per-platform status and how to verify / inject a checksum.
+
 Files
 -----
 
@@ -37,3 +43,46 @@ Windows / Linux
 ---------------
 Only macOS binaries are bundled here. Windows and Linux packaging still fetch
 FFmpeg/libvlc from their pinned upstream sources on first build (SHA-verified).
+
+=========================================================================
+P2-25 补充说明：预置归档与 SHA-256 校验现状（2026-11-27）
+=========================================================================
+
+sparse-checkout 现状
+--------------------
+本仓库 `git sparse-checkout list` 为 `/*` + `!/third-party/binaries/`：
+默认 clone **不会检出本目录**，工作区里看不到上面的归档（走查时工作区确实
+没有该目录），但 git 中一直保有一份 `SOURCE.txt` 清单。README 里
+「clone 后直接打包即可，全程不联网」只在归档确实齐全时才成立；缺文件时
+脚本会回退到联网下载 / 源码编译。请先用 `ls third-party/binaries/` 确认。
+
+格式：<文件名>  SHA-256=<64 位小写 hex>  来源=<URL 或说明>
+
+macOS（唯一随仓库分发的预置归档；SHA 同时写在 build.gradle.kts 的
+       bundledVlcSha256 与 scripts/fetch-ffmpeg-macos.sh 的 PREBUILT_SHA256）
+  vlc-3.0.21.dmg
+      SHA-256 = 50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0
+      来源     = videolan 3.0.21 universal dmg
+  ffmpeg-macos-universal
+      SHA-256 = ec49289086ee9334cd33f83c24bd51b6d3907761dc3f13e379927916ecb5aadb
+      来源     = 本仓库 scripts/fetch-ffmpeg-macos.sh 编译并 lipo 合并（2026-11-21）
+
+Windows / Linux（本仓库不预置，走联网下载；没有内置期望 SHA）
+  vlc-3.0.21.zip       SHA-256 = <未提供>  来源 = videolan 3.0.21 win64
+  upx-4.2.4.zip        SHA-256 = <未提供>  来源 = UPX 4.2.4 win64
+  vlc-3.0.21.jar       SHA-256 = <未提供>  来源 = videolan 3.0.21 linux
+  upx-4.2.4.tar.xz     SHA-256 = <未提供>  来源 = UPX 4.2.4 linux
+  ffmpeg-n*-win64-lgpl-*.zip
+      SHA-256 = 见 scripts/fetch-ffmpeg.ps1 的 $ExpectedSha256（该脚本已强制校验）
+
+联网下载的 libvlc 归档默认没有期望 SHA，composeApp/build.gradle.kts 的
+verifyVlcArchive 会在打包前明确告警「本次未校验」，而不是静默跳过。
+拿到官方归档后请自行计算并注入：
+
+    ./gradlew -PvlcArchiveSha256=<sha256> :composeApp:packageReleaseDistributionForCurrentOS
+
+或把归档与其 SHA 一并补进本目录和本清单，让离线预置路径也覆盖该平台。
+
+升级任一二进制时必须同步更新：本文件、build.gradle.kts 的
+vlcBundleVersion / upxBundleVersion / bundledVlcSha256、fetch-ffmpeg* 脚本里的
+版本与 SHA 常量，以及 README 的对应说明。

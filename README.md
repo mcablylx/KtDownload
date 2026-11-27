@@ -220,7 +220,7 @@ macOS 打包由 `scripts/fetch-ffmpeg-macos.sh` 准备 FFmpeg：仓库预置归�
 
 ### 离线打包（无需下载 FFmpeg / libvlc）
 
-离线打包依赖 `third-party/binaries/` 下**校验过 SHA-256 的预置归档**（macOS 版 FFmpeg 为 universal，同时支持 Intel 与 Apple Silicon；libvlc 为 universal 3.0.21）。**默认 clone 不一定包含这些大文件**——本仓库的 sparse-checkout 排除了该目录，走查时该目录甚至不存在；请先 `ls third-party/binaries/` 确认归档齐全（清单与 SHA 见 `third-party/binaries/SOURCE.txt`）。只有在归档齐全时，下面这条路径才成立「全程不联网、不现场编译」：
+离线打包依赖 `third-party/binaries/` 下**校验过 SHA-256 的预置归档**（macOS 版 FFmpeg 为 universal，同时支持 Intel 与 Apple Silicon；libvlc 为 universal 3.0.21）。**默认 clone 不一定包含这些大文件**——本仓库的 sparse-checkout 规则是 `!/third-party/binaries/`，工作区不会检出该目录（git 中仍保有 `SOURCE.txt` 清单文件）；请先 `ls third-party/binaries/` 确认归档齐全（清单与 SHA 见 `third-party/binaries/SOURCE.txt`）。只有在归档齐全时，下面这条路径才成立「全程不联网、不现场编译」：
 
 ```bash
 git clone <repo-url>
