@@ -322,7 +322,9 @@ val upxArchiveName = when {
 }
 val vlcSetupCacheDir = gradle.gradleUserHomeDir.resolve("vlcSetup")
 
-// 仓库内预置归档（third-party/binaries/）：别人 clone 后无需联网即可打包。
+// 可选预置归档（third-party/binaries/）：归档齐全时 clone 后无需联网即可打包。
+// 默认 sparse-checkout 会排除该目录，仓库里只有 SOURCE.txt 清单；缺归档时
+// restoreVlcFromRepo 的 onlyIf 不满足，自动走原来的联网下载路径（见 README）。
 // 在 vlcDownload 之前把它还原到 gradle 缓存，于是下面的 onlyIf 会判定「已存在」
 // 而跳过联网下载。校验 SHA-256，防止归档损坏或被人替换。
 val bundledVlcArchive = rootProject.layout.projectDirectory.file("third-party/binaries/$vlcArchiveName")

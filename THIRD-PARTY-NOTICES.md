@@ -395,7 +395,8 @@ GitHub-bound export by changing the root `LICENSE` to AGPL-3.0.**
 ### Upstream disclaimer (docs/DISCLAIMER.md), carried forward
 
 Downstream users of this branch should be told the same things the upstream project
-tells its users. Full text: `docs/DISCLAIMER.md` in <https://github.com/tidain/YunX-Desktop>.
+tells its users. Local Chinese summary: `docs/DISCLAIMER.md`; full upstream text:
+`docs/DISCLAIMER.md` in <https://github.com/tidain/YunX-Desktop>.
 
 1. **Non-commercial, study/research only.** No official support or warranty. The project is
    free and open source; **any paid copy, resale or "licensed" build is a scam** — ask for a
