@@ -399,7 +399,10 @@ class QuarkApi(
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
             throw QuarkApiException("响应解析失败")
         }
-        if (json.optInt("status") != 200 && json.optInt("code") != 0) {
+        if (!response.isSuccessful) {
+            throw QuarkApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             // 失败响应无 status 字段（默认0），用 code 识别（如 21001 file not found）
             throw QuarkApiException(
                 json.optString("message").ifBlank { "获取下载链接失败" },
@@ -456,7 +459,10 @@ class QuarkApi(
             throw QuarkApiException("响应解析失败（HTTP ${response.code}）")
         }
         val code = json.optInt("code")
-        if (json.optInt("status") != 200 && code != 0) {
+        if (!response.isSuccessful) {
+            throw QuarkApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             throw QuarkApiException(guestErrorMessage(code, json.optString("message")), code)
         }
         val array = json.optJSONArray("data") ?: throw QuarkApiException("响应缺少 data")
@@ -513,7 +519,10 @@ class QuarkApi(
             throw QuarkApiException("响应解析失败（HTTP ${response.code}）")
         }
         val code = json.optInt("code")
-        if (json.optInt("status") != 200 && code != 0) {
+        if (!response.isSuccessful) {
+            throw QuarkApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             throw QuarkApiException(noSaveErrorMessage(code, json.optString("message")), code)
         }
         val array = json.optJSONArray("data") ?: throw QuarkApiException("响应缺少 data")

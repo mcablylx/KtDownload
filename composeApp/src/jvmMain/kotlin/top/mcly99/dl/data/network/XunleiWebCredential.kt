@@ -163,7 +163,10 @@ object XunleiWebCredential {
               var s=all[i].trim();
               if(s.indexOf('deviceid=')!==0)continue;
               var d=decodeURIComponent(s.slice(9));
-              data.device_id=(d.indexOf('.')>-1&&d.length>32)?d.split('.')[1].slice(0,32):d;
+              // P2-12：网页会下发「前缀.32位hex」的复合设备号，旧实现只认裸 32 位，
+              // 取不到就把设备号丢掉，重登后直接「请求参数错误」。
+              var dm=/^(?:[^.]+\.)*([0-9a-fA-F]{32})${'$'}/.exec(String(d||'').trim());
+              data.device_id=dm?dm[1]:'';
               break;
             }
           }catch(e){}
@@ -174,7 +177,9 @@ object XunleiWebCredential {
               var ks=['device_id','deviceId','xunlei_device_id'];
               for(var k=0;k<ks.length;k++){
                 var v=localStorage.getItem(ks[k]);
-                if(v&&/^[0-9a-fA-F]{32}${'$'}/.test(v)){data.device_id=v;break;}
+                // P2-12：同样的复合形态（任意前缀 + .32位hex）也要能认出来
+                var lm=/^(?:[^.]+\.)*([0-9a-fA-F]{32})${'$'}/.exec(String(v||'').trim());
+                if(lm){data.device_id=lm[1];break;}
               }
             }catch(e){}
           }
@@ -201,6 +206,12 @@ object XunleiWebCredential {
           localStorage.removeItem('$STORAGE_KEY');
           localStorage.removeItem('$CAPTCHA_KEY');
           localStorage.removeItem('current_sub');
+          // P2-12：退出登录必须连设备号一起清，否则换号后仍读到上一个账号的 device_id
+          var ks=['device_id','deviceId','xunlei_device_id'];
+          for(var k=0;k<ks.length;k++){try{localStorage.removeItem(ks[k]);}catch(e){}}
+          // P2-15：桥接写入的凭据 Cookie 一并删除，不再依赖 max-age 自然过期
+          for(var i=0;i<64;i++){document.cookie='$CRED_COOKIE_PREFIX'+i+'=;path=/;max-age=0';}
+          document.cookie='$CRED_COOKIE_COUNT=;path=/;max-age=0';
         }catch(e){}})()
     """.trimIndent()
 
@@ -214,6 +225,10 @@ object XunleiWebCredential {
      */
     val COOKIE_BRIDGE_SCRIPT: String = """
         (function(){try{
+          // P2-15：只允许在 https 的 xunlei.com 及其子域写桥接 Cookie。
+          // 登录过程会跳 i.xunlei.com 等官方域；若当前页面是风控页/广告页，注入等于把 refresh_token 送出去。
+          var host=String(location.hostname||'').toLowerCase();
+          if(host!=='xunlei.com'&&!/\.xunlei\.com${'$'}/.test(host))return;
           var prefix='$STORAGE_KEY';
           var sub=localStorage.getItem('current_sub');
           var raw=sub?localStorage.getItem(prefix+'@'+sub):localStorage.getItem(prefix);
@@ -231,7 +246,10 @@ object XunleiWebCredential {
               var s=all[i].trim();
               if(s.indexOf('deviceid=')!==0)continue;
               var d=decodeURIComponent(s.slice(9));
-              data.device_id=(d.indexOf('.')>-1&&d.length>32)?d.split('.')[1].slice(0,32):d;
+              // P2-12：网页会下发「前缀.32位hex」的复合设备号，旧实现只认裸 32 位，
+              // 取不到就把设备号丢掉，重登后直接「请求参数错误」。
+              var dm=/^(?:[^.]+\.)*([0-9a-fA-F]{32})${'$'}/.exec(String(d||'').trim());
+              data.device_id=dm?dm[1]:'';
               break;
             }
           }catch(e){}
@@ -242,7 +260,9 @@ object XunleiWebCredential {
               var ks=['device_id','deviceId','xunlei_device_id'];
               for(var k=0;k<ks.length;k++){
                 var v=localStorage.getItem(ks[k]);
-                if(v&&/^[0-9a-fA-F]{32}${'$'}/.test(v)){data.device_id=v;break;}
+                // P2-12：同样的复合形态（任意前缀 + .32位hex）也要能认出来
+                var lm=/^(?:[^.]+\.)*([0-9a-fA-F]{32})${'$'}/.exec(String(v||'').trim());
+                if(lm){data.device_id=lm[1];break;}
               }
             }catch(e){}
           }
@@ -250,9 +270,9 @@ object XunleiWebCredential {
           var size=3000;
           var n=Math.ceil(payload.length/size); if(n<1)n=1;
           for(var j=0;j<n;j++){
-            document.cookie='$CRED_COOKIE_PREFIX'+j+'='+payload.substr(j*size,size)+';path=/;max-age=600';
+            document.cookie='$CRED_COOKIE_PREFIX'+j+'='+payload.substr(j*size,size)+';path=/;max-age=120;Secure;SameSite=Lax';
           }
-          document.cookie='$CRED_COOKIE_COUNT='+n+';path=/;max-age=600';
+          document.cookie='$CRED_COOKIE_COUNT='+n+';path=/;max-age=120;Secure;SameSite=Lax';
         }catch(e){}})()
     """.trimIndent()
 

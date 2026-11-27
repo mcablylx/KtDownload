@@ -12,6 +12,7 @@ import org.cef.callback.CefCookieVisitor
 import org.cef.misc.BoolRef
 import org.cef.network.CefCookie
 import org.cef.network.CefCookieManager
+import top.mcly99.dl.data.network.XunleiWebCredential
 import top.mcly99.dl.engine.clouddrive.XunleiDriveCredential
 import top.mcly99.dl.utils.deduplicateCookiePairs
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -133,5 +134,29 @@ internal fun clearCookies(domains: List<String>) {
             runCatching { manager.deleteCookies("https://$d", null) }
             runCatching { manager.deleteCookies("http://$d", null) }
         }
+    }
+}
+
+/**
+ * P2-15：只删「JS 桥接」写入的那几条 Cookie（`yunx_xl_cred_*`）。
+ *
+ * 桥接 Cookie 里是明文 refresh_token，只需要活到「JS 写入 → Kotlin 读回」这一瞬。
+ * 每次轮询读完立即删除，避免它按 max-age 在浏览器里躺满全程；
+ * 退出登录走 [clearCookies] 时会连同域名下所有 Cookie 一起清掉。
+ */
+internal fun clearXunleiBridgeCookies() {
+    runCatching {
+        val manager = CefCookieManager.getGlobalManager() ?: return
+        manager.visitAllCookies(object : CefCookieVisitor {
+            override fun visit(cookie: CefCookie, count: Int, total: Int, delete: BoolRef): Boolean {
+                val name = cookie.name.orEmpty()
+                if (name.startsWith(XunleiWebCredential.CRED_COOKIE_PREFIX) ||
+                    name == XunleiWebCredential.CRED_COOKIE_COUNT
+                ) {
+                    runCatching { delete.set(true) }
+                }
+                return true
+            }
+        })
     }
 }

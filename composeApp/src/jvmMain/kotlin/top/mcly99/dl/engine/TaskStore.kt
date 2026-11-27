@@ -6,11 +6,11 @@ import top.mcly99.dl.model.TaskType
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
 import top.mcly99.dl.utils.AtomicPropsFile
+import top.mcly99.dl.utils.FilePermissions
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import java.nio.file.attribute.PosixFilePermissions
 import java.time.LocalDateTime
 import java.util.Properties
 
@@ -60,20 +60,17 @@ object TaskStore {
     /**
      * 收紧任务文件的权限（v8-P0-1 的纵深防御）。
      *
-     * 目录 `0700`、文件 `0600`：即使将来又有人往里写敏感字段，同机其他用户也读不到。
-     * Windows 不支持 POSIX 权限，`runCatching` 直接跳过。
+     * POSIX 下目录 `0700`、文件 `0600`：即使将来又有人往里写敏感字段，同机其他用户也读不到。
+     * Windows 没有 POSIX 权限，旧实现 `runCatching` 静默跳过等于没做；现在由
+     * [FilePermissions] 检查 ACL，对 Everyone / Users 可读时明确告警（P2-16）。
      */
     private fun hardenPermissions() {
         if (!dirHardened) {
             dirHardened = true
-            runCatching {
-                Files.setPosixFilePermissions(storePath.parent, PosixFilePermissions.fromString("rwx------"))
-            }
+            storePath.parent?.let { FilePermissions.hardenDirectory(it) }
         }
         // 每次 save 都用新文件替换：新文件继承的是 umask（常见 0644），必须重新收紧
-        runCatching {
-            Files.setPosixFilePermissions(storePath, PosixFilePermissions.fromString("rw-------"))
-        }
+        FilePermissions.hardenFile(storePath)
     }
 
     /**

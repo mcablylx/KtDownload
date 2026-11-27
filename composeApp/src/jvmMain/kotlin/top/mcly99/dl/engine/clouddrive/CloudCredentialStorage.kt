@@ -3,12 +3,12 @@ package top.mcly99.dl.engine.clouddrive
 import top.mcly99.dl.data.network.SharePlatform
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.FilePermissions
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.Properties
@@ -27,7 +27,8 @@ import javax.crypto.spec.SecretKeySpec
  * - **AAD 用平台名**：把夸克的密文搬到 UC 键下会解密失败，避免跨用途重放；
  * - 主密钥：随机 32 字节，单独存 `cloud-credentials.key`，仅靠 `0600` 文件权限保护
  *   （等价于上游 `DbEncryptionLevel.LOOSE`，没有 Windows DPAPI / 机器指纹包裹）；
- * - 目录 `0700`、两个文件 `0600`，与 `TaskStore` 的纵深防御一致；
+ * - POSIX 下目录 `0700`、两个文件 `0600`；Windows 没有 POSIX 权限，由
+ *   [FilePermissions] 检查 ACL，对 Everyone / Users 可读时明确告警（P2-16，不再静默 no-op）；
  * - 写入走「临时文件 + ATOMIC_MOVE」，崩溃不会留下半截密文。
  *
  * 与 `TaskStore` 刻意不写会话 Cookie 并不矛盾：那里拒绝的是**明文**落盘，这里是加密落盘。
@@ -131,6 +132,8 @@ class FileCloudCredentialStorage(
                 Files.deleteIfExists(tmp)
             }
         }
+        // P2-16：首次密钥由 load() 创建时也要收紧（旧实现只有 save() 才调用 hardenPermissions）
+        FilePermissions.hardenFile(keyFile)
         val raw = Files.readAllBytes(keyFile)
         if (raw.size != 32) {
             AppLogger.warn("CloudCredentialStorage", "主密钥长度异常，忽略已保存的网盘凭证")
@@ -162,16 +165,11 @@ class FileCloudCredentialStorage(
 
     private fun b64(bytes: ByteArray): String = Base64.getEncoder().encodeToString(bytes)
 
-    /** 每次 save 都用新文件替换：新文件继承 umask（常见 0644），必须重新收紧 */
+    /** 每次 save 都用新文件替换：新文件继承 umask（常见 0644），必须重新收紧（P2-16 跨平台） */
     private fun hardenPermissions() {
-        runCatching {
-            Files.setPosixFilePermissions(dataDir, PosixFilePermissions.fromString("rwx------"))
-        }
-        for (path in listOf(storeFile, keyFile)) {
-            runCatching {
-                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
-            }
-        }
+        FilePermissions.hardenDirectory(dataDir)
+        FilePermissions.hardenFile(storeFile)
+        FilePermissions.hardenFile(keyFile)
     }
 
     private companion object {

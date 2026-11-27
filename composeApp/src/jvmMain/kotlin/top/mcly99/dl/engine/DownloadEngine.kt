@@ -1287,124 +1287,137 @@ class DownloadEngine(
         var connection = opened.first
         var code = opened.second
 
-        /** 放弃续传：断开当前连接，从 0 重开一条不带 Range 的 */
-        fun restartFromZero(reason: String) {
-            AppLogger.info("DownloadEngine", "$reason，从头重下: ${task.fileName}")
-            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
-            startByte = 0L
-            connection = newConnection(source.first, source.second)
-            taskConnections[taskId] = connection
-            connection.connect()
-            code = connection.responseCode
-        }
-
-        if (code == HTTP_RANGE_NOT_SATISFIABLE) {
-            // 416：本地文件已达/超过远端长度。恰好相等说明上次已下完但状态没来得及落库。
-            if (totalSize > 0 && startByte == totalSize) {
-                ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
-                taskConnections.remove(taskId)
-                return@withContext
-            }
-            // 否则（远端变小、本地文件异常）放弃续传，从头重下
-            restartFromZero("本地偏移超出远端长度（416）")
-        }
-
-        // 206 但起点不是我们要的位置：少数服务器会忽略 If-Range、或把越界区间截断后照旧回 206。
-        // 把从 0 开始的字节写进 startByte 处，就是一份静默错位的文件，只能从头重下。
-        if (code == HttpURLConnection.HTTP_PARTIAL && startByte > 0) {
-            val reportedStart = contentRangeStart(connection)
-            if (reportedStart != null && reportedStart != startByte) {
-                restartFromZero("响应起点 $reportedStart 与请求的 $startByte 不符")
-            }
-        }
-
-        if (code == HttpURLConnection.HTTP_OK && startByte > 0) {
-            // 200 + 我们带了 Range，只有两种可能：服务器不支持续传，或 If-Range 判定内容已变。
-            // 两种都从头写；连接本身可以直接用，它给的就是完整内容。
-            AppLogger.info(
-                "DownloadEngine",
-                "服务端返回 200（不支持续传或内容已变），从头写: ${task.fileName}",
-            )
-            startByte = 0L
-        } else if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
-            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
-            taskConnections.remove(taskId)
-            throw IllegalStateException("HTTP $code")
-        }
-
-        // 这次响应头里的指纹最权威（探测与这次请求之间还可能变），顺手更新记录的指纹。
-        // 只在真的变化时才写，避免每个任务都多一次落盘。
-        val responseFingerprint = fingerprintOf(connection)
-        if (responseFingerprint.isKnown && responseFingerprint != task.fingerprint) {
-            updateTask(taskId, fingerprint = responseFingerprint)
-        }
-
-        // 响应头里就有远程长度：200 时是总长，206 时是本段长度（总长 - startByte）。
-        // HEAD 探测失败（夸克等 CDN 对 HEAD 回 403）时，这里是唯一能拿到真实大小的机会；
-        // 不补的话任务会一直显示「139 MB / 0 B」，进度恒 0%、速度恒 0。
-        val remoteLength = runCatching { connection.contentLengthLong }.getOrDefault(-1L)
-        val resolvedTotal = when {
-            totalSize > 0 -> totalSize
-            code == HttpURLConnection.HTTP_PARTIAL && remoteLength > 0 -> startByte + remoteLength
-            code == HttpURLConnection.HTTP_OK && remoteLength > 0 -> remoteLength
-            else -> 0L
-        }
-        if (resolvedTotal > 0 && resolvedTotal != task.totalSize) {
-            updateTask(taskId, totalSize = resolvedTotal)
-        }
-
-        val channel = FileChannel.open(
-            file.toPath(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-        )
-        taskFiles.computeIfAbsent(taskId) { CopyOnWriteArrayList() }.add(channel)
-        // 丢弃上次中断后残留的尾部，确保从 offset 开始的文件长度与 offset 一致
-        channel.truncate(startByte)
-        channel.position(startByte)
-
-        // tracker 只在本次下载内使用，直接构造即可（v4-P2-1：原先进全局注册表但从不读回）
-        val tracker = DownloadProgressTracker(resolvedTotal, 1)
-        tracker.update(0, startByte)
-
-        // 限速器的阻塞等待无法感知协程取消，这里把当前 Job 传进去，取消后立即退出
-        val selfJob = currentCoroutineContext()[Job]
-        var written = startByte
-        var lastEmit = 0L
+        // P2-04：openSingleSource 成功返回后，直到 FileChannel 打开、数据读完之间还有一串可能抛异常
+        // 的步骤（restartFromZero 重连、fingerprintOf、FileChannel.open/truncate、磁盘满……）。
+        // 旧实现只在读写阶段有 try/finally，早期异常时这条 HttpURLConnection 既不 disconnect
+        // 也不从 taskConnections 移除，socket 会一直占着。这里统一由外层 finally 收口。
         try {
-            limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
-                val buffer = ByteBuffer.allocate(AppConstants.SINGLE_BUFFER_SIZE)
-                val array = buffer.array()
-                while (true) {
-                    // 显式用 currentCoroutineContext()：类内有同名 scope 成员
-                    currentCoroutineContext().ensureActive()
-                    val n = input.read(array, 0, array.size)
-                    if (n < 0) break
-                    buffer.clear()
-                    buffer.limit(n)
-                    while (buffer.hasRemaining()) channel.write(buffer)
-                    written += n
-                    tracker.update(0, written)
-                    val now = System.currentTimeMillis()
-                    if (now - lastEmit >= AppConstants.IO_POLL_MS) {
-                        // 用 tracker 的结果而不是裸 written：进度与速度必须基于同一口径。
-                        // 否则服务器多给了字节时会出现「3.39 MB / 6.83 KB + 0 B/s」。
-                        emitProgress(taskId, tracker.totalDone(), tracker.sampleSpeed(now))
-                        lastEmit = now
-                    }
+            /** 放弃续传：断开当前连接，从 0 重开一条不带 Range 的 */
+            fun restartFromZero(reason: String) {
+                AppLogger.info("DownloadEngine", "$reason，从头重下: ${task.fileName}")
+                ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
+                startByte = 0L
+                connection = newConnection(source.first, source.second)
+                taskConnections[taskId] = connection
+                connection.connect()
+                code = connection.responseCode
+            }
+
+            if (code == HTTP_RANGE_NOT_SATISFIABLE) {
+                // 416：本地文件已达/超过远端长度。恰好相等说明上次已下完但状态没来得及落库。
+                if (totalSize > 0 && startByte == totalSize) return@withContext
+                // 否则（远端变小、本地文件异常）放弃续传，从头重下
+                restartFromZero("本地偏移超出远端长度（416）")
+            }
+
+            // 206 但起点不是我们要的位置：少数服务器会忽略 If-Range、或把越界区间截断后照旧回 206。
+            // 把从 0 开始的字节写进 startByte 处，就是一份静默错位的文件，只能从头重下。
+            if (code == HttpURLConnection.HTTP_PARTIAL && startByte > 0) {
+                val reportedStart = contentRangeStart(connection)
+                if (reportedStart != null && reportedStart != startByte) {
+                    restartFromZero("响应起点 $reportedStart 与请求的 $startByte 不符")
                 }
             }
-            // 已知总大小时校验落盘长度，避免服务器提前断开却把任务标记为完成
-            if (resolvedTotal > 0 && written != resolvedTotal) {
-                throw IllegalStateException("下载不完整：已写入 $written / $resolvedTotal 字节")
+
+            if (code == HttpURLConnection.HTTP_OK && startByte > 0) {
+                // 200 + 我们带了 Range，只有两种可能：服务器不支持续传，或 If-Range 判定内容已变。
+                // 两种都从头写；连接本身可以直接用，它给的就是完整内容。
+                AppLogger.info(
+                    "DownloadEngine",
+                    "服务端返回 200（不支持续传或内容已变），从头写: ${task.fileName}",
+                )
+                startByte = 0L
+            } else if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
+                throw IllegalStateException("HTTP $code")
             }
-            emitProgress(taskId, tracker.totalDone(), 0L)
+
+            // 这次响应头里的指纹最权威（探测与这次请求之间还可能变），顺手更新记录的指纹。
+            // 只在真的变化时才写，避免每个任务都多一次落盘。
+            val responseFingerprint = fingerprintOf(connection)
+            if (responseFingerprint.isKnown && responseFingerprint != task.fingerprint) {
+                updateTask(taskId, fingerprint = responseFingerprint)
+            }
+
+            // 响应头里就有远程长度：200 时是总长，206 时是本段长度（总长 - startByte）。
+            // HEAD 探测失败（夸克等 CDN 对 HEAD 回 403）时，这里是唯一能拿到真实大小的机会；
+            // 不补的话任务会一直显示「139 MB / 0 B」，进度恒 0%、速度恒 0。
+            val remoteLength = runCatching { connection.contentLengthLong }.getOrDefault(-1L)
+            val resolvedTotal = when {
+                totalSize > 0 -> totalSize
+                code == HttpURLConnection.HTTP_PARTIAL && remoteLength > 0 -> startByte + remoteLength
+                code == HttpURLConnection.HTTP_OK && remoteLength > 0 -> remoteLength
+                else -> 0L
+            }
+            if (resolvedTotal > 0 && resolvedTotal != task.totalSize) {
+                updateTask(taskId, totalSize = resolvedTotal)
+            }
+
+            val channel = FileChannel.open(
+                file.toPath(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.WRITE,
+            )
+            taskFiles.computeIfAbsent(taskId) { CopyOnWriteArrayList() }.add(channel)
+            // 丢弃上次中断后残留的尾部，确保从 offset 开始的文件长度与 offset 一致
+            channel.truncate(startByte)
+            channel.position(startByte)
+
+            // tracker 只在本次下载内使用，直接构造即可（v4-P2-1：原先进全局注册表但从不读回）
+            val tracker = DownloadProgressTracker(resolvedTotal, 1)
+            tracker.update(0, startByte)
+
+            // 限速器的阻塞等待无法感知协程取消，这里把当前 Job 传进去，取消后立即退出
+            val selfJob = currentCoroutineContext()[Job]
+            var written = startByte
+            var lastEmit = 0L
+            try {
+                limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
+                    val buffer = ByteBuffer.allocate(AppConstants.SINGLE_BUFFER_SIZE)
+                    val array = buffer.array()
+                    while (true) {
+                        // 显式用 currentCoroutineContext()：类内有同名 scope 成员
+                        currentCoroutineContext().ensureActive()
+                        val n = input.read(array, 0, array.size)
+                        if (n < 0) break
+                        buffer.clear()
+                        buffer.limit(n)
+                        while (buffer.hasRemaining()) channel.write(buffer)
+                        written += n
+                        tracker.update(0, written)
+                        val now = System.currentTimeMillis()
+                        if (now - lastEmit >= AppConstants.IO_POLL_MS) {
+                            // 用 tracker 的结果而不是裸 written：进度与速度必须基于同一口径。
+                            // 否则服务器多给了字节时会出现「3.39 MB / 6.83 KB + 0 B/s」。
+                            emitProgress(taskId, tracker.totalDone(), tracker.sampleSpeed(now))
+                            lastEmit = now
+                        }
+                    }
+                }
+                // 已知总大小时校验落盘长度，避免服务器提前断开却把任务标记为完成
+                if (resolvedTotal > 0 && written != resolvedTotal) {
+                    throw IllegalStateException("下载不完整：已写入 $written / $resolvedTotal 字节")
+                }
+                emitProgress(taskId, tracker.totalDone(), 0L)
+            } finally {
+                closeQuietly(channel, "DownloadEngine")
+                taskFiles[taskId]?.remove(channel)
+            }
         } finally {
-            closeQuietly(channel, "DownloadEngine")
-            taskFiles[taskId]?.remove(channel)
-            taskConnections.remove(taskId)
-            ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
+            releaseSingleConnection(taskId, connection)
         }
+    }
+
+    /**
+     * P2-04：单线程路径的连接收口。建连成功后到数据读完之间的**任何**退出路径
+     * （416 提前返回、restartFromZero 重连失败、FileChannel.open/truncate 抛异常、
+     * 磁盘满、主动取消、正常完成）都必须经过这里：先从登记表移除，再断开 socket。
+     *
+     * 抽成 internal 方法是为了让「异常路径真的断连」可以用假连接做确定性单测，
+     * 而不是依赖真实 HttpServer 的 socket 状态。
+     */
+    internal fun releaseSingleConnection(taskId: String, connection: HttpURLConnection) {
+        taskConnections.remove(taskId)
+        ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
     }
 
     /**

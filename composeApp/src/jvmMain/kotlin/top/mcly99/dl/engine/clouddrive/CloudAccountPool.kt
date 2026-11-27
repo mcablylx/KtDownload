@@ -3,11 +3,11 @@ package top.mcly99.dl.engine.clouddrive
 import top.mcly99.dl.data.network.SharePlatform
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.FilePermissions
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.PosixFilePermissions
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.Properties
@@ -156,6 +156,8 @@ class FileCloudAccountStorage(
                 Files.deleteIfExists(tmp)
             }
         }
+        // P2-16：首次密钥由 load() 创建时也要收紧
+        FilePermissions.hardenFile(keyFile)
         val raw = Files.readAllBytes(keyFile)
         if (raw.size != 32) {
             AppLogger.warn("CloudAccountPool", "主密钥长度异常，忽略已保存的网盘账号")
@@ -224,14 +226,9 @@ class FileCloudAccountStorage(
     }
 
     private fun hardenPermissions() {
-        runCatching {
-            Files.setPosixFilePermissions(dataDir, PosixFilePermissions.fromString("rwx------"))
-        }
-        for (path in listOf(storeFile, keyFile)) {
-            runCatching {
-                Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"))
-            }
-        }
+        FilePermissions.hardenDirectory(dataDir)
+        FilePermissions.hardenFile(storeFile)
+        FilePermissions.hardenFile(keyFile)
     }
 
     private companion object {

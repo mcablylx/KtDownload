@@ -749,8 +749,10 @@ class Pan123Api(
         client.newCall(request).execute().use { response ->
             val body = response.body?.string()
                 ?: throw IllegalStateException("请求失败：响应为空（${response.code}）")
-            if (!response.isSuccessful && body.isBlank()) {
-                throw IllegalStateException("请求失败（HTTP ${response.code}）")
+            if (!response.isSuccessful) {
+                // P2-07：403/429 常带一个非空 HTML/文本错误页；旧写法只在 body 为空时抛，
+                // 结果 JSONObject(html) 的解析异常被上层 runCatching 吞成「分享不存在」。
+                throw IllegalStateException("请求失败（HTTP ${response.code}）${bodySnippet(body)}")
             }
             return JSONObject(body)
         }

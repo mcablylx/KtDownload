@@ -403,7 +403,10 @@ class UCApi(
             throw UCApiException("响应解析失败（HTTP ${response.code}）")
         }
         val code = json.optInt("code")
-        if (json.optInt("status") != 200 && code != 0) {
+        if (!response.isSuccessful) {
+            throw UCApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             throw UCApiException(guestErrorMessage(code, json.optString("message")), code)
         }
         val array = json.optJSONArray("data") ?: throw UCApiException("响应缺少 data")
@@ -452,7 +455,10 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
             throw UCApiException("响应解析失败")
         }
-        if (json.optInt("status") != 200 && json.optInt("code") != 0) {
+        if (!response.isSuccessful) {
+            throw UCApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             throw UCApiException(
                 json.optString("message").ifBlank { "获取下载链接失败" },
                 json.optInt("code")
@@ -512,7 +518,10 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         val json = runCatching { JSONObject(bodyStr) }.getOrElse {
             throw UCApiException("响应解析失败")
         }
-        if (json.optInt("status") != 200 && json.optInt("code") != 0) {
+        if (!response.isSuccessful) {
+            throw UCApiException("获取下载链接失败（HTTP ${response.code}）", response.code)
+        }
+        if (json.hasBusinessError()) {
             throw UCApiException(
                 json.optString("message").ifBlank { "获取下载链接失败" },
                 json.optInt("code")
@@ -561,8 +570,10 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
             .build()
         runCatching {
             val resp = client.newCall(request).execute()
-            val json = JSONObject(resp.use { it.body?.string() } ?: "{}")
-            if (json.optInt("status") != 200 && json.optInt("code") != 0) return@runCatching null
+            val body = resp.use { it.body?.string() } ?: "{}"
+            if (!resp.isSuccessful) return@runCatching null
+            val json = JSONObject(body)
+            if (json.hasBusinessError()) return@runCatching null
             val data = json.optJSONObject("data") ?: return@runCatching null
             val playInfo = data.optJSONObject("play_info") ?: return@runCatching null
             val directUrl = playInfo.optString("url").takeIf { it.isNotBlank() } ?: return@runCatching null
@@ -603,8 +614,10 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
             .build()
         return runCatching {
             val resp = client.newCall(request).execute()
-            val json = JSONObject(resp.use { it.body?.string() } ?: "{}")
-            if (json.optInt("status") != 200 && json.optInt("code") != 0) return@runCatching null
+            val body = resp.use { it.body?.string() } ?: "{}"
+            if (!resp.isSuccessful) return@runCatching null
+            val json = JSONObject(body)
+            if (json.hasBusinessError()) return@runCatching null
             val list = json.optJSONObject("data")?.optJSONArray("video_list") ?: return@runCatching null
             for (i in 0 until list.length()) {
                 val info = list.optJSONObject(i)?.optJSONObject("video_info") ?: continue

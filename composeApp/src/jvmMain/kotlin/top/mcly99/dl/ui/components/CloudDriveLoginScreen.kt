@@ -53,6 +53,7 @@ import top.mcly99.dl.engine.clouddrive.CloudDriveLoginCatalog
 import top.mcly99.dl.engine.clouddrive.CloudLoginMode
 import top.mcly99.dl.engine.clouddrive.browser.JcefHolder
 import top.mcly99.dl.engine.clouddrive.browser.clearCookies
+import top.mcly99.dl.engine.clouddrive.browser.clearXunleiBridgeCookies
 import top.mcly99.dl.engine.clouddrive.browser.collectLoginCookies
 import top.mcly99.dl.engine.clouddrive.browser.collectXunleiCredential
 import top.mcly99.dl.theme.CloudDriveStrings
@@ -141,19 +142,25 @@ fun CloudDriveLoginScreen(
             val (credential, incomplete) = withContext(Dispatchers.IO) {
                 when (config.mode) {
                     CloudLoginMode.XUNLEI_WEB -> {
-                        runCatching {
-                            SwingUtilities.invokeLater {
-                                browser.browser.executeJavaScript(
-                                    XunleiWebCredential.COOKIE_BRIDGE_SCRIPT,
-                                    XunleiWebCredential.LOGIN_URL,
-                                    0,
-                                )
+                        // P2-15：只在可信域（https + *.xunlei.com）注入桥接脚本。
+                        // 若当前停在风控页/广告页，注入会把明文 refresh_token 写进该页面的 Cookie。
+                        val currentUrl = runCatching { browser.browser.url }.getOrNull()
+                        if (XunleiWebCredential.isTrustedUrl(currentUrl)) {
+                            runCatching {
+                                SwingUtilities.invokeLater {
+                                    browser.browser.executeJavaScript(
+                                        XunleiWebCredential.COOKIE_BRIDGE_SCRIPT,
+                                        XunleiWebCredential.LOGIN_URL,
+                                        0,
+                                    )
+                                }
                             }
                         }
                         delay(400)
                         // 规范 JSON 含 refresh_token，过期后能自动刷新；
-                        // fromCookiePairs 内部已兼容「Cookie 里只有裸 access_token」的情况
-                        collectXunleiCredential() to false
+                        // fromCookiePairs 内部已兼容「Cookie 里只有裸 access_token」的情况。
+                        // P2-15：读回后立刻删桥接 Cookie，不让明文 token 按 max-age 躺在浏览器里。
+                        collectXunleiCredential().also { clearXunleiBridgeCookies() } to false
                     }
 
                     CloudLoginMode.COOKIE -> {
@@ -467,6 +474,20 @@ fun CloudDriveLoginScreen(
                     if (config != null) {
                         uiScope.launch {
                             withContext(Dispatchers.IO) { clearCookies(config.cookieDomains) }
+                            if (config.mode == CloudLoginMode.XUNLEI_WEB) {
+                                // P2-12：退出登录还要清 localStorage 里的 device_id / 旧凭据，
+                                // 否则换号后仍读到上一个账号的设备号（重登「请求参数错误」的根因之一）
+                                runCatching {
+                                    SwingUtilities.invokeLater {
+                                        browser?.browser?.executeJavaScript(
+                                            XunleiWebCredential.CLEAR_SESSION_SCRIPT,
+                                            XunleiWebCredential.LOGIN_URL,
+                                            0,
+                                        )
+                                    }
+                                }
+                                runCatching { browser?.browser?.reload() }
+                            }
                         }
                         vm.logout(platform)
                         detected = null
