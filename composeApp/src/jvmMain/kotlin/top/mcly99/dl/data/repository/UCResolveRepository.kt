@@ -10,6 +10,7 @@ package top.mcly99.dl.data.repository
 
 import top.mcly99.dl.data.network.UCApi
 import top.mcly99.dl.data.network.UCConstants
+import top.mcly99.dl.data.network.UcProbeOutcome
 import top.mcly99.dl.data.network.ShareLinkParser
 import top.mcly99.dl.data.network.model.DownloadLink
 import top.mcly99.dl.data.network.model.ShareFile
@@ -113,20 +114,28 @@ class UCResolveRepository(private val api: UCApi) : ShareResolveRepository {
     ): Result<DownloadLink> = runCatching {
         // 视频：优先用分享态 video_preview 取**原画**直链（走播放回调 checkplay，不换片，绕过宣传片替换）
         if (isVideo(file.fname)) {
-            val preview = api.getVideoPreview(
+            // P2-09：区分「服务端没有原画直链」与「这次请求根本没成功」。
+            // 旧实现把 403 / 超时 / 连接重置全压成 null，一律当成「不支持」去回落普通取链，
+            // 于是错误被静默吞掉、同一份失败请求还会再发一遍。
+            when (val preview = api.getVideoPreviewOutcome(
                 pwdId = session.shareId,
                 stoken = session.stoken,
                 fid = file.fid,
                 fidToken = file.fidToken,
-                cookie = cookie
-            )
-            if (preview != null) {
-                return@runCatching DownloadLink(
+                cookie = cookie,
+            )) {
+                is UcProbeOutcome.Success -> return@runCatching DownloadLink(
                     fid = file.fid,
                     filename = file.fname,
-                    downloadUrl = preview.downloadUrl,
-                    size = preview.size,
+                    downloadUrl = preview.value.downloadUrl,
+                    size = preview.value.size,
                     isHls = false
+                )
+                // 明确的业务否定：才允许回落到普通取链，保持原有行为
+                UcProbeOutcome.Unsupported -> Unit
+                is UcProbeOutcome.Unavailable -> throw IllegalStateException(
+                    "视频原画直链探测失败（${preview.httpCode?.let { "HTTP $it" } ?: "网络错误"}）：" +
+                        "${preview.reason}；不再把它当作「不支持」重复取链",
                 )
             }
         }

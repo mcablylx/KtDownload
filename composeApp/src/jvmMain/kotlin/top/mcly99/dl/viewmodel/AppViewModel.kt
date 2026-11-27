@@ -229,8 +229,10 @@ class AppViewModel {
      */
     val myDriveAccounts: CloudDriveAccountStore get() = cloudAccounts
     val myDrive = MyDriveViewModel(
-        api = DefaultMyDriveApi(onCredentialRefreshed = { platform, value ->
-            cloudAccounts.updateCredential(platform, cloudAccounts.credentialFor(platform), value)
+        api = DefaultMyDriveApi(onCredentialRefreshed = { platform, expected, value ->
+            // P2-10：按本次刷新请求实际使用的旧凭证定位账号；
+            // 旧实现一律回落到主账号，会把 B 账号刷新出的 token 写进 A。
+            cloudAccounts.updateCredential(platform, expected, value)
         }),
         accounts = cloudAccounts,
         stringsProvider = { myDriveStrings(settings.language) },

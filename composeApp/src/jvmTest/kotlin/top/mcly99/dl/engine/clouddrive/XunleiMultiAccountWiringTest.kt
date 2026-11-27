@@ -103,7 +103,7 @@ class XunleiMultiAccountWiringTest {
 
     @Test
     fun cloud_drive_service_wires_the_account_provider() = runBlocking {
-        val repo = CloudDriveService().repository(SharePlatform.XUNLEI) as XunleiResolveRepository
+        val repo = CloudDriveService().repository(SharePlatform.XUNLEI, "") as XunleiResolveRepository
         val provider = repo.accountByTokenProvider
         assertNotNull(provider, "createRepository 必须接线 accountByTokenProvider（P1-03）")
 

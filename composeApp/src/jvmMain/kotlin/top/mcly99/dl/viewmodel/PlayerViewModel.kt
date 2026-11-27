@@ -12,6 +12,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import top.mcly99.dl.engine.player.PlaybackEngine
@@ -88,6 +91,17 @@ class PlayerViewModel(
 
     /** 单飞的内核初始化：连点「播放」只加载一次 libvlc */
     private var engineInit: Deferred<PlaybackEngine?>? = null
+
+    /**
+     * P2-02：引擎发布的闸门。
+     *
+     * `engineFactory` 里的 libvlc 加载是 1~2 秒的阻塞 native 调用，协程取消打断不了它；
+     * 旧 `shutdown()` 顺序是 cancel → release → VlcRuntime.release()，而 `createEngine()`
+     * 可能在这之后才把 `player = engine` 写回来，留下一个指向已释放 runtime 的引擎。
+     */
+    private val engineLock = Any()
+    @Volatile
+    private var shutdownCalled = false
 
     /** 内核不可用的原因；成功创建后为 null */
     var engineError by mutableStateOf<String?>(null)
@@ -201,11 +215,44 @@ class PlayerViewModel(
     /** 应用退出时释放 native 资源 */
     fun shutdown() {
         qualityJob?.cancel()
+        val init = engineInit
+        // 先关发布闸门：即便 init 里的 native 调用还要再跑一会儿，也不许再写回 player
+        synchronized(engineLock) { shutdownCalled = true }
+        init?.cancel()
         scope.cancel()
-        player?.release()
-        player = null
+        val released = synchronized(engineLock) {
+            val p = player
+            player = null
+            p
+        }
+        released?.release()
         engineInit = null
-        VlcRuntime.release()
+        // P2-02：native 阻塞调用不响应取消。若初始化尚未结束，必须等它真正退出
+        // 之后再释放全局 runtime，否则它拿着一个已释放的 factory 创建播放器，
+        // 随后的 release 会踩到悬空 native 状态。用完成回调而非 runBlocking，
+        // 避免把「等 1~2 秒」压到调用 shutdown 的线程上。
+        if (init == null || init.isCompleted) {
+            VlcRuntime.release()
+        } else {
+            init.invokeOnCompletion { VlcRuntime.release() }
+        }
+    }
+
+    /**
+     * 只在不曾 shutdown 时发布引擎；返回 false 表示调用方应自己释放刚创建的实例。
+     */
+    private fun publishEngine(engine: PlaybackEngine?): Boolean {
+        synchronized(engineLock) {
+            if (shutdownCalled) return false
+            if (engine == null) {
+                engineError = VlcRuntime.lastError() ?: "未找到播放内核"
+                AppLogger.warn("PlayerViewModel", "播放内核不可用: $engineError")
+            } else {
+                engineError = null
+                player = engine
+            }
+            return true
+        }
     }
 
     // ------------------------------------------------------------------ 内部
@@ -219,6 +266,8 @@ class PlayerViewModel(
      * @param onReady 真正开始播之后才执行（例如清晰度探测）
      */
     private fun start(request: PlaybackRequest, cachingMs: Int, onReady: (() -> Unit)? = null) {
+        // shutdown 之后作用域已取消，再发起 start 只会得到一个立刻取消的 async
+        if (shutdownCalled) return
         active = request
         activeCachingMs = cachingMs
         open = true
@@ -295,17 +344,23 @@ class PlayerViewModel(
         qualities = emptyList()
     }
 
-    /** 在 IO 线程上创建播放器；失败只记录原因，不影响下载等其余功能 */
-    private fun createEngine(): PlaybackEngine? {
+    /**
+     * 在 IO 线程上创建播放器；失败只记录原因，不影响下载等其余功能。
+     *
+     * P2-02：进入前与 native 阻塞返回后各检查一次取消，并只经 [publishEngine] 闸门写回
+     * [player]。这样「shutdown 已经跑完、init 才姗姗来迟」时不会留下一个指向已释放
+     * runtime 的引擎，也不会让它继续被起播逻辑使用。
+     */
+    private suspend fun createEngine(): PlaybackEngine? {
+        currentCoroutineContext().ensureActive()
         val engine = runCatching { engineFactory({ state = it }, { frame = it }) }
             .onFailure { AppLogger.warn("PlayerViewModel", "创建播放器失败: ${it.message}", it) }
             .getOrNull()
-        if (engine == null) {
-            engineError = VlcRuntime.lastError() ?: "未找到播放内核"
-            AppLogger.warn("PlayerViewModel", "播放内核不可用: $engineError")
-        } else {
-            engineError = null
-            player = engine
+        val stillActive = currentCoroutineContext().isActive
+        if (!stillActive || !publishEngine(engine)) {
+            // 已取消或已 shutdown：这个刚创建的实例没有归属，直接释放
+            engine?.let { runCatching { it.release() } }
+            return null
         }
         return engine
     }

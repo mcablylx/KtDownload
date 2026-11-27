@@ -77,9 +77,12 @@ class VideoPlayer(
     private val onFrame: (ImageBitmap?) -> Unit,
 ) : PlaybackEngine {
 
-    private var current = PlaybackState()
+    /**
+     * P2-02：libvlc 回调线程与 UI 线程共享的状态改用原子容器，避免 read-copy-write 丢字段。
+     */
+    private val stateHolder = PlaybackStateHolder()
 
-    val state: PlaybackState get() = current
+    val state: PlaybackState get() = stateHolder.value
 
     private val player: EmbeddedMediaPlayer = factory.mediaPlayers().newEmbeddedMediaPlayer()
 
@@ -94,14 +97,18 @@ class VideoPlayer(
     @Volatile
     private var lastFrameAtNs = 0L
 
-    /** 只保留最后一次请求的地址，用于「重播」 */
+    /** 只保留最后一次请求的地址，用于「重播」；libvlc 的 error 回调线程也会读 */
+    @Volatile
     private var lastRequest: PlaybackRequest? = null
 
+    @Volatile
     private var lastCachingMs = 0
 
     /** 音量与静音在播放器实例上保留：切档 / 重播都不该把用户调好的音量打回去 */
+    @Volatile
     private var volume = DEFAULT_VOLUME
 
+    @Volatile
     private var muted = false
 
     /** 已分配的帧缓冲像素数；0 表示还没分配 */
@@ -330,12 +337,15 @@ class VideoPlayer(
         }.onFailure { AppLogger.warn("VideoPlayer", "设置音量失败: ${it.message}") }
     }
 
-    /** 统一的状态更新入口：先更新本地副本，再推给 ViewModel */
-    private fun update(block: (PlaybackState) -> PlaybackState) = emit(block(current))
+    /**
+     * 统一的状态更新入口：P2-02 走原子 CAS，基于最新值重算，再把结果推给 ViewModel。
+     */
+    private fun update(block: (PlaybackState) -> PlaybackState) {
+        onState(stateHolder.update(block))
+    }
 
     private fun emit(next: PlaybackState) {
-        current = next
-        onState(next)
+        onState(stateHolder.emit(next))
     }
 
     /**

@@ -78,6 +78,22 @@ class TransferViewModel {
     private val activeTransfers = ConcurrentHashMap<String, Job>()
     private var pendingRestart: Job? = null
 
+    /**
+     * P2-01：`startServer` 跑在多线程 [ioScope] 上，而 `setWebServerEnabled` 原来只能取消
+     * Main 上的 [pendingRestart] —— 已经派发到 IO 的那次启动不会被取消，用户关掉开关后
+     * 服务仍可能被重新拉起，旧结果也会覆盖新状态。
+     *
+     * 用「期望状态 + 代次」三处校验：进入 startServer 前、IO 线程真正 bind 前（由
+     * `WebUploadServer.start` 的 allowStart 在同一把生命周期锁内执行）、结果回写 Main 前。
+     */
+    @Volatile
+    private var webServerDesiredEnabled = false
+    @Volatile
+    private var webServerGeneration = 0L
+
+    private fun isCurrentWebServerGeneration(generation: Long): Boolean =
+        webServerDesiredEnabled && generation == webServerGeneration
+
     /** 设备在线状态（由最后一次广播时间推导），供 UI 映射时使用 */
     var deviceOnline by mutableStateOf<Map<String, Boolean>>(emptyMap())
         private set
@@ -211,6 +227,10 @@ class TransferViewModel {
         // 取消之前的延迟重启
         pendingRestart?.cancel()
         pendingRestart = null
+        // P2-01：让所有在途（含已 launch 但尚未 bind）的启动立即失效
+        webServerGeneration++
+        webServerDesiredEnabled = enabled
+        val generation = webServerGeneration
 
         webServerPort = port
         engine.advertisedWebPort = port
@@ -230,12 +250,12 @@ class TransferViewModel {
 
         if (!webServerRunning) {
             // 首次启动：立即执行
-            startServer(port)
+            startServer(port, generation)
         } else {
             // 端口变更：3 秒防抖后重启
             pendingRestart = scope.launch {
                 delay(AppConstants.WEB_PORT_RESTART_DEBOUNCE_MS)
-                startServer(port)
+                startServer(port, generation)
                 pendingRestart = null
             }
         }
@@ -248,11 +268,15 @@ class TransferViewModel {
      * 成功了才关旧的，所以换端口失败时旧服务仍在原端口正常工作（P1-20）。
      * 这时界面上要如实显示「还在旧端口跑」并给出错误提示，而不是把地址和运行状态一起清空。
      */
-    private fun startServer(port: Int) {
+    private fun startServer(port: Int, generation: Long = webServerGeneration) {
+        if (!isCurrentWebServerGeneration(generation)) return
         webServerError = false
         engine.advertisedWebPort = port
         ioScope.launch {
-            val ok = webServer.start(port)
+            // launch 之后、真正 bind 之前可能已经被禁用：把判断交给 WebUploadServer 在
+            // 生命周期锁内再核一次，避免「先 stop、后 start」把服务重新拉起来。
+            val ok = webServer.start(port) { isCurrentWebServerGeneration(generation) }
+            if (!isCurrentWebServerGeneration(generation)) return@launch
             // 失败时回滚到「实际在监听的端口」，别让「设备发现」继续广播一个没人监听的端口
             val outcome = WebPortOutcome.resolve(
                 requestedPort = port,
@@ -262,6 +286,8 @@ class TransferViewModel {
             )
             engine.advertisedWebPort = outcome.activePort
             scope.launch {
+                // 结果回写前再核一次代次：旧结果不能覆盖新开关 / 新端口的状态
+                if (!isCurrentWebServerGeneration(generation)) return@launch
                 webServerRunning = outcome.available
                 webServerError = outcome.failed
                 webServerPort = outcome.activePort
@@ -472,6 +498,9 @@ class TransferViewModel {
 
     fun cleanup() {
         pendingRestart?.cancel()
+        // P2-01：清理时同样作废旧代次，避免 cleanup 之后还有在途启动把服务拉起来
+        webServerGeneration++
+        webServerDesiredEnabled = false
         webServer.stop()
         engine.stop()
         scope.cancel()

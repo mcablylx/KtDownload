@@ -48,19 +48,18 @@ interface MyDriveApi {
 
 class DefaultMyDriveApi(
     private val adapters: Map<SharePlatform, MyDrivePlatformAdapter> = defaultMyDriveAdapters(),
-    /** 迅雷 access_token 自动刷新后写回账号池的落点，由 AppViewModel 注入 */
-    private val onCredentialRefreshed: (SharePlatform, String) -> Unit = { _, _ -> },
+    /** 迅雷 access_token 自动刷新后写回账号池的落点，由 AppViewModel 注入（平台、旧凭证、新凭证） */
+    private val onCredentialRefreshed: (SharePlatform, String, String) -> Unit = { _, _, _ -> },
     /**
      * 可注入的 Repository 工厂：测试用 fake，生产复用 [CloudDriveService] 已验证过的
      * 构造骨架（迅雷三件套 / 123 与光鸭的 token provider 都在里面）。
      */
     private val shareRepository: (SharePlatform, String) -> ShareResolveRepository = { platform, credential ->
         val service = CloudDriveService()
-        // Repository 内部用 lambda 现取 credential，先同步再用；迅雷刷新后的新 token
-        // 经 credentialSink 写回账号池，避免「卡片显示已登录但列目录一直 401」。
-        service.useCredential(credential)
-        service.bindCredentialSink { _, value -> onCredentialRefreshed(platform, value) }
-        service.repository(platform)
+        // P2-10：凭证按请求显式传参，Repository 缓存按「平台 + 凭证」隔离；
+        // 迅雷刷新后的新 token 带上本次请求的旧凭证写回账号池，避免多账号串号。
+        service.bindCredentialSink { _, expected, value -> onCredentialRefreshed(platform, expected, value) }
+        service.repository(platform, credential)
     },
 ) : MyDriveApi {
 

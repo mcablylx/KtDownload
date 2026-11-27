@@ -106,7 +106,9 @@ class WebUploadServer(
     /** 单调时钟（毫秒），失败限速的窗口判定用；单测可注入假时钟 */
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
+    @Volatile
     var strings: UiStrings = zhCN()
+    @Volatile
     var onFileReceived: (File) -> Unit = {}
 
     var saveDir: String = saveDir
@@ -115,10 +117,22 @@ class WebUploadServer(
             File(value).mkdirs()
         }
 
+    /**
+     * P2-01：启动 / 停止串行化。
+     *
+     * `start()` 由 `TransferViewModel` 的 `ioScope`（多线程）调用，`stop()` 在 Main，
+     * `setWebServerEnabled` 的防抖重启又是第三个协程 —— 四个生命周期字段原来都是普通
+     * 字段且无互斥，「禁用」与「延迟重启」交错时会互相覆盖 server / executor / watchdog。
+     */
+    private val lifecycleLock = Any()
+
+    @Volatile
     private var server: HttpServer? = null
+    @Volatile
     private var executor: ExecutorService? = null
 
     /** 当前实际监听的端口；未运行时是最后一次成功启动的端口 */
+    @Volatile
     var port: Int = AppConstants.DEFAULT_WEB_PORT
         private set
 
@@ -237,17 +251,25 @@ class WebUploadServer(
      * 同一端口重复调用直接返回 true：先停后建会踩 `BindException`（监听中的端口不能被
      * 第二个 socket 抢，`SO_REUSEADDR` 也救不了），而且本来就没有重启的必要。
      *
+     * P2-01：整个启动过程与 [stop] 共用 [lifecycleLock] 串行化，避免多个协程同时重建
+     * server / executor / watchdog 时互相覆盖。[allowStart] 会在**同一把锁内**再核一次
+     * 「这次启动是否仍然被期望」，用来关掉「用户已禁用、但启动请求已派发到 IO 线程」的窗口。
+     *
      * @return 目标端口上是否有服务在监听
      */
-    fun start(listenPort: Int): Boolean {
+    fun start(listenPort: Int, allowStart: (() -> Boolean)? = null): Boolean = synchronized(lifecycleLock) {
+        if (allowStart != null && !allowStart()) {
+            AppLogger.info("WebUpload", "启动请求已过期（服务已被禁用或端口已变更），跳过")
+            return@synchronized false
+        }
         if (server != null && listenPort == port) {
             AppLogger.info("WebUpload", "服务已在端口 $port 运行，跳过重启")
-            return true
+            return@synchronized true
         }
 
         var created: HttpServer? = null
         var pool: ExecutorService? = null
-        return try {
+        try {
             created = HttpServer.create()
             created.bind(
                 if (bindHost.isBlank() || bindHost == "0.0.0.0") InetSocketAddress(listenPort)
@@ -282,6 +304,9 @@ class WebUploadServer(
             port = listenPort
             if (previousServer != null) {
                 AppLogger.info("WebUpload", "端口切换完成，关闭旧服务")
+                // P2-01：HttpServer.stop(0) 不会关已建立的 HttpExchange；切端口时先关掉
+                // 属于旧服务的活跃上传，否则旧线程池里的阻塞读会一直挂着。
+                closeActiveUploads(previousServer)
                 shutdown(previousServer, previousPool)
             }
             AppLogger.info("WebUpload", "服务已启动: $bindHost:$port (本机 IP: ${getLocalIp()})")
@@ -295,11 +320,15 @@ class WebUploadServer(
         }
     }
 
-    fun stop() {
+    fun stop(): Unit = synchronized(lifecycleLock) {
         val previous = server
         val pool = executor
         server = null
         executor = null
+        // P2-01：顺序很关键。原来只 `activeUploads.clear()` + `HttpServer.stop(0)`，
+        // 既不关已建立的 HttpExchange（阻塞中的 read 一直占住业务线程），又先把看门狗
+        // 关掉、让唯一的兜底也失效。现在先主动关活跃连接，再停监听 / 线程池，最后关看门狗。
+        closeActiveUploads(null)
         shutdown(previous, pool)
         watchdog?.shutdownNow()
         watchdog = null
@@ -478,7 +507,8 @@ class WebUploadServer(
         }
 
         val saved = mutableListOf<File>()
-        val session = UploadActivity(exchange)
+        // P2-01：记录该请求属于哪个服务实例，换端口时才能只关旧服务的活跃连接
+        val session = UploadActivity(ownerOf(exchange), exchange)
         activeUploads.add(session)
         try {
             val files = exchange.requestBody.use { body ->
@@ -522,7 +552,7 @@ class WebUploadServer(
      * 参数，端口层面的 `SocketTimeout` 也拿不到，所以只能自己数「最后一次读到数据是
      * 什么时候」，再由看门狗关掉长时间没动静的连接（P1-22）。
      */
-    private class UploadActivity(val exchange: HttpExchange) {
+    private class UploadActivity(val owner: HttpServer?, val exchange: HttpExchange) {
         @Volatile
         private var lastActivityAt: Long = System.currentTimeMillis()
 
@@ -531,6 +561,26 @@ class WebUploadServer(
         }
 
         fun idleMs(now: Long): Long = now - lastActivityAt
+    }
+
+    /** 取请求所属的服务实例；自定义/伪造的 HttpExchange 没有上下文时返回 null */
+    private fun ownerOf(exchange: HttpExchange): HttpServer? =
+        runCatching { exchange.httpContext.server }.getOrNull()
+
+    /**
+     * P2-01：主动关闭活跃上传连接，让阻塞中的 `read` 抛异常并释放业务线程。
+     *
+     * [owner] 为 null 表示关闭全部（[stop]）；否则只关属于该服务实例的连接（换端口时
+     * 不能把刚起来的新服务上的上传也掐掉）。`remove` 的原子性保证看门狗的空闲清扫
+     * 与这里的停止清扫不会重复关同一个 exchange。
+     */
+    private fun closeActiveUploads(owner: HttpServer?) {
+        for (session in activeUploads) {
+            if (owner != null && session.owner != null && session.owner !== owner) continue
+            if (!activeUploads.remove(session)) continue
+            runCatching { session.exchange.close() }
+                .onFailure { AppLogger.warn("WebUpload", "关闭活跃上传连接失败: ${it.message}") }
+        }
     }
 
     /** 套在请求体外层，把每次读取都记成一次活动 */
@@ -545,6 +595,8 @@ class WebUploadServer(
     }
 
     private val activeUploads = java.util.concurrent.ConcurrentHashMap.newKeySet<UploadActivity>()
+
+    @Volatile
     private var watchdog: java.util.concurrent.ScheduledExecutorService? = null
 
     /** 关掉空闲超时的连接：`exchange.close()` 会让阻塞中的 `read` 抛异常并释放线程 */

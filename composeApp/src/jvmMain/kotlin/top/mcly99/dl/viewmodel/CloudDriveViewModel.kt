@@ -112,12 +112,6 @@ class CloudDriveViewModel(
     val accountStrings: MultiAccountStrings get() = accountStringsProvider()
 
     /**
-     * 当前批量取链正在使用的凭证。解析层刷新 token 时 `credentialSink` 只带「平台 + 新值」，
-     * 靠它才能把新 token 写回**轮换到的那个账号**，而不是一律写回主账号。
-     */
-    @Volatile
-    private var activeCredential: String = ""
-    /**
      * 解析层自动刷新出的新凭证要写回「网盘列表」卡片。
      *
      * 迅雷的 access_token 只有几小时，过期后由解析层用 refresh_token 换新的；
@@ -125,9 +119,10 @@ class CloudDriveViewModel(
      * 「明明登录了却一直提示重新登录」）。
      */
     init {
-        api.bindCredentialSink { platform, value ->
-            val expected = activeCredential.takeIf { it.isNotBlank() }
-                ?: accounts.credentialFor(platform)
+        // P2-10：sink 直接带「本次刷新请求用的旧凭证」，由账号池按旧值精确定位；
+        // 不再靠 ViewModel 的 activeCredential 共享字段去猜账号 —— 并发轮换时它会被
+        // 另一个请求覆盖，正是「B 账号的 token 写进 A 账号」的根源。
+        api.bindCredentialSink { platform, expected, value ->
             accounts.updateCredential(platform, expected, value)
             onAccountsChanged()
         }
@@ -1088,50 +1083,45 @@ class CloudDriveViewModel(
         var ok = 0
         var failed = 0
         var firstError: String? = null
-        try {
-            for ((index, target) in targets.withIndex()) {
-                val (file, relativeDir) = target
-                val fileCred = pool[index % pool.size]
-                activeCredential = fileCred
-                try {
-                    val primary = withContext(ioDispatcher) {
-                        api.downloadLink(s, file.toShareFile(), fileCred, platform)
-                    }.copy(relativeDir = relativeDir)
-                    // C2：把备选直链挂到 CloudLink 上，再由 onDownload 原样传给引擎。
-                    // 上游的 pendingAltLinks 就是漏了「传参」这一步，altSources 恒为空、功能空转。
-                    val prepared = withAltSources(s, file, fileCred, primary, pool)
-                    val link = prepared.link
-                    // 记下「这条直链是谁取的」：轮换出来的次账号也要能正确清理自己的 tr_* 目录（P1-17）
-                    rememberCredential(link, fileCred)
-                    prepared.cleanups.forEach { (altLink, altCred) -> rememberCredential(altLink, altCred) }
-                    links = (listOf(link) + links).distinctBy { it.url }
-                    val taskId = onDownload(link)
-                    if (taskId == null) {
-                        // 引擎拒收（协议不支持 / 地址为空）不能算成功：以前这里只跳过清理登记，
-                        // 随后照样 markAdded + ok++，UI 报「成功 N 个」、直链按钮变「已加入」不可重试，
-                        // 而下载队列里什么都没有（P1-16）。
-                        failed++
-                        if (firstError == null) firstError = "下载引擎拒绝加入队列"
-                        AppLogger.warn("CloudDriveViewModel", "入队被下载引擎拒绝: ${file.name}")
-                        continue
-                    }
-                    registerCleanup(taskId, link, fileCred)
-                    // 每条备选链若也建了 tr_* 临时目录，按「取链时那个账号」分别清理
-                    prepared.cleanups.forEach { (altLink, altCred) ->
-                        registerCleanup(taskId, altLink, altCred)
-                    }
-                    markAdded(link.url)
-                    ok++
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
+        for ((index, target) in targets.withIndex()) {
+            val (file, relativeDir) = target
+            val fileCred = pool[index % pool.size]
+            try {
+                val primary = withContext(ioDispatcher) {
+                    api.downloadLink(s, file.toShareFile(), fileCred, platform)
+                }.copy(relativeDir = relativeDir)
+                // C2：把备选直链挂到 CloudLink 上，再由 onDownload 原样传给引擎。
+                // 上游的 pendingAltLinks 就是漏了「传参」这一步，altSources 恒为空、功能空转。
+                val prepared = withAltSources(s, file, fileCred, primary, pool)
+                val link = prepared.link
+                // 记下「这条直链是谁取的」：轮换出来的次账号也要能正确清理自己的 tr_* 目录（P1-17）
+                rememberCredential(link, fileCred)
+                prepared.cleanups.forEach { (altLink, altCred) -> rememberCredential(altLink, altCred) }
+                links = (listOf(link) + links).distinctBy { it.url }
+                val taskId = onDownload(link)
+                if (taskId == null) {
+                    // 引擎拒收（协议不支持 / 地址为空）不能算成功：以前这里只跳过清理登记，
+                    // 随后照样 markAdded + ok++，UI 报「成功 N 个」、直链按钮变「已加入」不可重试，
+                    // 而下载队列里什么都没有（P1-16）。
                     failed++
-                    if (firstError == null) firstError = e.message
-                    AppLogger.warn("CloudDriveViewModel", "取链失败 ${file.name}: ${e.message}", e)
+                    if (firstError == null) firstError = "下载引擎拒绝加入队列"
+                    AppLogger.warn("CloudDriveViewModel", "入队被下载引擎拒绝: ${file.name}")
+                    continue
                 }
+                registerCleanup(taskId, link, fileCred)
+                // 每条备选链若也建了 tr_* 临时目录，按「取链时那个账号」分别清理
+                prepared.cleanups.forEach { (altLink, altCred) ->
+                    registerCleanup(taskId, altLink, altCred)
+                }
+                markAdded(link.url)
+                ok++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failed++
+                if (firstError == null) firstError = e.message
+                AppLogger.warn("CloudDriveViewModel", "取链失败 ${file.name}: ${e.message}", e)
             }
-        } finally {
-            activeCredential = ""
         }
         return FetchSummary(ok, failed, firstError)
     }
@@ -1160,33 +1150,28 @@ class CloudDriveViewModel(
         }
         val sources = mutableListOf<DownloadSource>()
         val cleanups = mutableListOf<Pair<CloudLink, String>>()
-        try {
-            for (altCred in pool) {
-                if (altCred == primaryCred || altCred.isBlank()) continue
-                // 解析层刷新 token 时按「本次取链的凭证」写回对应账号（P3 的 activeCredential）
-                activeCredential = altCred
-                val alt = runCatching {
-                    withContext(ioDispatcher) {
-                        api.downloadLink(s, file.toShareFile(), altCred, platform)
-                    }
-                }.getOrElse { e ->
-                    AppLogger.warn("CloudDriveViewModel", "C2 备选直链失败 ${file.name}: ${e.message}", e)
-                    continue
+        for (altCred in pool) {
+            if (altCred == primaryCred || altCred.isBlank()) continue
+            // P2-10：凭证通过 api.downloadLink 的 altCred 参数显式传递；刷新出的新 token
+            // 由解析层带「本次请求用的旧凭证」写回对应账号，不再依赖共享可变字段。
+            val alt = runCatching {
+                withContext(ioDispatcher) {
+                    api.downloadLink(s, file.toShareFile(), altCred, platform)
                 }
-                if (alt.url.isBlank() || alt.url == primary.url) continue
-                sources += DownloadSource(
-                    url = alt.url,
-                    referer = alt.referer.takeIf { it.isNotBlank() },
-                    cookie = alt.cookie.takeIf { it.isNotBlank() },
-                    userAgent = alt.userAgent,
-                    origin = alt.origin,
-                    secChUa = alt.secChUa,
-                )
-                if (!alt.cleanupDirFid.isNullOrBlank()) cleanups += alt to altCred
+            }.getOrElse { e ->
+                AppLogger.warn("CloudDriveViewModel", "C2 备选直链失败 ${file.name}: ${e.message}", e)
+                continue
             }
-        } finally {
-            // 主链后续若触发 token 刷新，仍要写回主账号，不能停在最后一个备选账号上
-            activeCredential = primaryCred
+            if (alt.url.isBlank() || alt.url == primary.url) continue
+            sources += DownloadSource(
+                url = alt.url,
+                referer = alt.referer.takeIf { it.isNotBlank() },
+                cookie = alt.cookie.takeIf { it.isNotBlank() },
+                userAgent = alt.userAgent,
+                origin = alt.origin,
+                secChUa = alt.secChUa,
+            )
+            if (!alt.cleanupDirFid.isNullOrBlank()) cleanups += alt to altCred
         }
         return AltSourcesResult(primary.copy(altSources = sources), cleanups)
     }

@@ -538,11 +538,14 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         )
     }
 
-        /**
+    /**
      * 分享视频预览（原画直链，绕过非会员视频下载被换成宣传片的问题）。
      * GET share/sharepage/video_preview？pwd_id/stoken/fid/fid_token →
      * data.play_info.url（原画 OSS 直链，走播放回调 checkplay 不换片）+ size（原画大小，可校验）。
      * 仅对分享态视频有意义；链接约 3 小时有效（x-ttl=10800）。
+     *
+     * P2-09：保留这个「只要值」的兼容签名；取链主链路改用 [getVideoPreviewOutcome]，
+     * 由调用方区分「服务端不支持」与「网络/鉴权失败」。
      */
     suspend fun getVideoPreview(
         pwdId: String,
@@ -550,7 +553,16 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
         fid: String,
         fidToken: String,
         cookie: String
-    ): DownloadLink? = withContext(Dispatchers.IO) {
+    ): DownloadLink? = getVideoPreviewOutcome(pwdId, stoken, fid, fidToken, cookie).valueOrNull()
+
+    /** P2-09：与 [getVideoPreview] 同一条链路，但把失败原因带出来，不再静默压成 null。 */
+    suspend fun getVideoPreviewOutcome(
+        pwdId: String,
+        stoken: String,
+        fid: String,
+        fidToken: String,
+        cookie: String
+    ): UcProbeOutcome<DownloadLink> = withContext(Dispatchers.IO) {
         val url = buildString {
             append(UCConstants.VIDEO_PREVIEW_URL)
             append("?pr=UCBrowser&fr=h5")
@@ -568,36 +580,67 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
             .header("Content-Type", "application/json")
             .get()
             .build()
-        runCatching {
-            val resp = client.newCall(request).execute()
-            val body = resp.use { it.body?.string() } ?: "{}"
-            if (!resp.isSuccessful) return@runCatching null
-            val json = JSONObject(body)
-            if (json.hasBusinessError()) return@runCatching null
-            val data = json.optJSONObject("data") ?: return@runCatching null
-            val playInfo = data.optJSONObject("play_info") ?: return@runCatching null
-            val directUrl = playInfo.optString("url").takeIf { it.isNotBlank() } ?: return@runCatching null
-            DownloadLink(
-                fid = fid,
-                filename = "",
-                downloadUrl = directUrl,
-                size = playInfo.optLong("size")
+        val resp = try {
+            client.newCall(request).execute()
+        } catch (e: Exception) {
+            return@withContext UcProbeOutcome.Unavailable(
+                "网络异常: ${e.message?.take(120) ?: e.javaClass.simpleName}",
             )
-        }.getOrNull()
+        }
+        resp.use { r ->
+            val raw = r.body?.string().orEmpty().ifBlank { "{}" }
+            if (!r.isSuccessful) return@use UcProbeOutcome.Unavailable("HTTP ${r.code}", r.code)
+            val json = try {
+                JSONObject(raw)
+            } catch (e: Exception) {
+                return@use UcProbeOutcome.Unavailable("响应不是合法 JSON: ${e.message?.take(120) ?: "解析失败"}")
+            }
+            if (json.hasBusinessError()) {
+                return@use UcProbeOutcome.Unavailable(
+                    "业务错误 code=${json.optInt("code")}：${json.optString("message").ifBlank { "无说明" }}",
+                )
+            }
+            // 2xx 且没有业务错误，但缺 data/play_info/url：这才是「服务端没有原画直链」，
+            // 允许上层回落到普通取链。
+            val playInfo = json.optJSONObject("data")?.optJSONObject("play_info")
+                ?: return@use UcProbeOutcome.Unsupported
+            val directUrl = playInfo.optString("url").takeIf { it.isNotBlank() }
+                ?: return@use UcProbeOutcome.Unsupported
+            UcProbeOutcome.Success(
+                DownloadLink(
+                    fid = fid,
+                    filename = "",
+                    downloadUrl = directUrl,
+                    size = playInfo.optLong("size"),
+                ),
+            )
+        }
     }
 
     /**
      * UC 转码播放流（绕过非会员视频下载被换成宣传片的问题）。
      * POST file/v2/play/project → data.video_list[].video_info.url（m3u8/fmp4）。
      * 仅对视频有意义；返回首个非空播放地址 + 其清晰度。
-     * 先试带 pr/fr 的主路径；失败则用裸路径重试（Alist getTranscodingLink 方式，对 UC 也可通）。
+     * 先试带 pr/fr 的主路径；**只有主路径明确不支持**才用裸路径重试（Alist 方式）。
+     *
+     * P2-09：网络 / HTTP / 鉴权错误不再试第二遍，避免把一次失败放大成两次请求。
      */
-    suspend fun getPlayLink(fid: String, cookie: String): PlayLink? = withContext(Dispatchers.IO) {
-        playProject(UCConstants.PLAY_URL, fid, cookie)
-            ?: playProject("${UCConstants.API_BASE}/1/clouddrive/file/v2/play/project", fid, cookie)
-    }
+    suspend fun getPlayLink(fid: String, cookie: String): PlayLink? =
+        getPlayLinkOutcome(fid, cookie).valueOrNull()
 
-    private fun playProject(url: String, fid: String, cookie: String): PlayLink? {
+    /** P2-09：带原因的转码播放取链结果。 */
+    suspend fun getPlayLinkOutcome(fid: String, cookie: String): UcProbeOutcome<PlayLink> =
+        withContext(Dispatchers.IO) {
+            val primary = playProject(UCConstants.PLAY_URL, fid, cookie)
+            when (primary) {
+                is UcProbeOutcome.Success -> primary
+                is UcProbeOutcome.Unavailable -> primary
+                UcProbeOutcome.Unsupported ->
+                    playProject("${UCConstants.API_BASE}/1/clouddrive/file/v2/play/project", fid, cookie)
+            }
+        }
+
+    private fun playProject(url: String, fid: String, cookie: String): UcProbeOutcome<PlayLink> {
         val body = JSONObject()
             .put("fid", fid)
             .put("resolutions", "low,normal,high,super,2k,4k")
@@ -612,25 +655,40 @@ suspend fun getDownloadLink(fid: String, cookie: String): DownloadLink? = withCo
             .header("Referer", UCConstants.DOWNLOAD_REFERER)
             .post(body.toRequestBody(jsonMediaType))
             .build()
-        return runCatching {
-            val resp = client.newCall(request).execute()
-            val body = resp.use { it.body?.string() } ?: "{}"
-            if (!resp.isSuccessful) return@runCatching null
-            val json = JSONObject(body)
-            if (json.hasBusinessError()) return@runCatching null
-            val list = json.optJSONObject("data")?.optJSONArray("video_list") ?: return@runCatching null
+        val resp = try {
+            client.newCall(request).execute()
+        } catch (e: Exception) {
+            return UcProbeOutcome.Unavailable("网络异常: ${e.message?.take(120) ?: e.javaClass.simpleName}")
+        }
+        return resp.use { r ->
+            val raw = r.body?.string().orEmpty().ifBlank { "{}" }
+            if (!r.isSuccessful) return@use UcProbeOutcome.Unavailable("HTTP ${r.code}", r.code)
+            val json = try {
+                JSONObject(raw)
+            } catch (e: Exception) {
+                return@use UcProbeOutcome.Unavailable("响应不是合法 JSON: ${e.message?.take(120) ?: "解析失败"}")
+            }
+            if (json.hasBusinessError()) {
+                return@use UcProbeOutcome.Unavailable(
+                    "业务错误 code=${json.optInt("code")}：${json.optString("message").ifBlank { "无说明" }}",
+                )
+            }
+            val list = json.optJSONObject("data")?.optJSONArray("video_list")
+                ?: return@use UcProbeOutcome.Unsupported
             for (i in 0 until list.length()) {
                 val info = list.optJSONObject(i)?.optJSONObject("video_info") ?: continue
                 val u = info.optString("url").takeIf { it.isNotBlank() } ?: continue
-                return@runCatching PlayLink(
-                    url = u,
-                    resolution = info.optString("resolution"),
-                    format = info.optString("format"),
-                    isHls = u.contains(".m3u8") || info.optString("format").contains("m3u8", true)
+                return@use UcProbeOutcome.Success(
+                    PlayLink(
+                        url = u,
+                        resolution = info.optString("resolution"),
+                        format = info.optString("format"),
+                        isHls = u.contains(".m3u8") || info.optString("format").contains("m3u8", true),
+                    ),
                 )
             }
-            null
-        }.getOrNull()
+            UcProbeOutcome.Unsupported
+        }
     }
 
     /** 删除文件（抓包：action_type=2 + filelist + exclude_fids）；返回 task_id */

@@ -336,21 +336,30 @@ class CloudDriveAccountStore(
     /**
      * 解析层刷新出的新凭证（迅雷 access_token）写回**当时正在使用的那个账号**。
      *
-     * `credentialSink` 只带「平台 + 新值」，不带旧值；C1 轮换时 ViewModel 会记下
-     * 当前活跃凭证。按凭证原文定位，找不到（例如用户刚改过）才回落主账号，
-     * 避免把 B 账号刷新出来的 token 写进 A 账号。
+     * P2-10：解析层把「本次请求用的旧凭证」随结果一起带出（不再靠 ViewModel 的共享
+     * `activeCredential` 字段去猜），这里按凭证原文精确定位。
+     * 定位失败时**丢弃**这次刷新结果，绝不回落主账号 —— 旧实现的回落正是多账号串号的
+     * 来源：B 账号刷新出的 token 被静默写进 A，A 的凭证从此变成另一个账号的。
      */
     fun updateCredential(platform: SharePlatform, expected: String, newValue: String) {
         val value = newValue.trim()
         if (value.isBlank()) return
-        synchronized(lock) {
+        val updated = synchronized(lock) {
             val row = accounts.firstOrNull {
                 it.platform == platform && it.credential == expected && expected.isNotBlank()
-            } ?: accounts.firstOrNull { it.platform == platform && it.isPrimary }
-            if (row == null) return
-            replace(row, row.copy(credential = value, updatedAt = System.currentTimeMillis()))
+            }
+            if (row == null) {
+                top.mcly99.dl.utils.AppLogger.warn(
+                    "CloudDriveAccounts",
+                    "刷新凭证写回失败：找不到 expected 对应的 ${platform.name} 账号，已丢弃该结果",
+                )
+                false
+            } else {
+                replace(row, row.copy(credential = value, updatedAt = System.currentTimeMillis()))
+                true
+            }
         }
-        persist()
+        if (updated) persist()
     }
 
     // ------------------------------------------------------------ 内部

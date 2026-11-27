@@ -159,11 +159,13 @@ class CloudAccountPoolTest {
         assertEquals("second-refreshed", s.accountById(SharePlatform.QUARK, second)?.credential)
         assertEquals("primary", s.credentialFor(SharePlatform.QUARK))
 
-        // 找不到活跃凭证（用户刚改过）时回落主账号，绝不静默丢弃刷新结果
+        // P2-10：找不到活跃凭证时**丢弃**刷新结果，绝不回落到主账号。
+        // 旧实现的回落会把 B 账号刷新出的 token 静默写进 A，造成多账号串号。
         s.updateCredential(SharePlatform.QUARK, "gone", "primary-refreshed")
-        assertEquals("primary-refreshed", s.credentialFor(SharePlatform.QUARK))
+        assertEquals("primary", s.credentialFor(SharePlatform.QUARK))
+        assertEquals("second-refreshed", s.accountById(SharePlatform.QUARK, second)?.credential)
         s.updateCredential(SharePlatform.QUARK, "primary", "  ")
-        assertEquals("primary-refreshed", s.credentialFor(SharePlatform.QUARK))
+        assertEquals("primary", s.credentialFor(SharePlatform.QUARK))
     }
 
     @Test

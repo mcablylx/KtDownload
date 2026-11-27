@@ -24,6 +24,32 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
+ * 把 [Proxy] 转成 Chromium `--proxy-server` 的值（P2-11）。
+ *
+ * 「跟随系统」模式下 [top.mcly99.dl.data.network.PlatformProxyDetector.toProxy] 可能返回
+ * `Proxy.Type.SOCKS`；旧实现无条件拼 `http://host:port`，浏览器会拿 SOCKS 服务当 HTTP
+ * 代理去握手，于是同一份代理设置下**只有深度抓取**失败（其它链路走 OkHttp，能正确按
+ * 类型处理）。这里按 `p.type()` 选 scheme；`DIRECT` 与无法解析的地址一律不加参数。
+ *
+ * IPv6 字面量必须加方括号，否则 `--proxy-server=socks5://::1:1080` 会被解析成非法端口。
+ */
+internal fun browserProxyArg(proxy: Proxy?): String? {
+    val p = proxy ?: return null
+    val address = p.address() as? InetSocketAddress ?: return null
+    val host = runCatching { address.hostString }.getOrNull().orEmpty().takeIf { it.isNotBlank() }
+        ?: return null
+    val port = address.port
+    if (port !in 1..65535) return null
+    val literal = if (host.contains(':') && !host.startsWith("[")) "[$host]" else host
+    return when (p.type()) {
+        Proxy.Type.DIRECT -> null
+        Proxy.Type.SOCKS -> "socks5://$literal:$port"
+        Proxy.Type.HTTP -> "http://$literal:$port"
+        else -> null
+    }
+}
+
+/**
  * 用本机 Chromium 内核（Chrome / Edge）做**请求拦截**抓取。
  *
  * ## 为什么需要它
@@ -48,7 +74,8 @@ import java.util.concurrent.atomic.AtomicReference
  * - 无头模式，不弹窗；单页面、禁扩展、禁下载
  * - 只读：不改请求、不注入脚本
  *
- * @param proxyProvider 走代理时传给浏览器的 `--proxy-server`（只支持 HTTP 代理，不支持认证）。
+ * @param proxyProvider 走代理时传给浏览器的 `--proxy-server`（P2-11 起按 [Proxy.getType]
+ *   选 scheme：HTTP → `http://`、SOCKS → `socks5://`；不支持认证）。
  *   用 lambda 现取而不是构造时快照：设置页改了代理要立刻生效
  * @param loadTimeoutMs 页面加载 + 抓取的总时限
  * @param settleMs 出现第一条可播地址后再等多久就收工（等后续清晰度列表/分片）
@@ -235,10 +262,9 @@ open class BrowserCapture(
             "--user-data-dir=$profile",
             "about:blank",
         )
-        proxyProvider()?.let { p ->
-            val address = p.address() as? InetSocketAddress
-            if (address != null) args.add(1, "--proxy-server=http://${address.hostString}:${address.port}")
-        }
+        // P2-11：按代理类型选 scheme。跟随系统时探测结果可能是 SOCKS，
+        // 一律拼 http:// 会让浏览器把 SOCKS 当 HTTP 代理，只有这条链路失败。
+        browserProxyArg(proxyProvider())?.let { arg -> args.add(1, "--proxy-server=$arg") }
         return ProcessBuilder(args)
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)

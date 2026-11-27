@@ -46,6 +46,9 @@ import kotlinx.coroutines.withContext
 import java.net.Proxy
 import java.util.concurrent.ConcurrentHashMap
 
+/** 按「平台 + 凭证」缓存的 Repository 上限；账号轮换场景下防止长期运行无界增长 */
+private const val MAX_CACHED_REPOSITORIES = 64
+
 /**
  * 「云盘」工具对解析器的调用契约。
  *
@@ -110,9 +113,13 @@ interface CloudDriveApi {
      * 注册「凭证被自动刷新后写回」的落点（迅雷的 access_token 会过期，刷新出的新 token
      * 必须同步到网盘列表，否则卡片上还是旧 token，下次解析又判过期）。
      *
+     * P2-10：sink 的第二个参数是**本次请求实际使用的旧凭证**。多账号并发时不能靠
+     * ViewModel 的「当前活跃凭证」共享字段去猜账号 —— 两个请求交错就会把 B 刷新出的
+     * token 写到 A。由解析层把请求凭证原样带出来，账号池才能精确按旧值定位。
+     *
      * 默认空实现：不关心凭证生命周期的平台（以及测试替身）不用实现它。
      */
-    fun bindCredentialSink(sink: (SharePlatform, String) -> Unit) {}
+    fun bindCredentialSink(sink: (SharePlatform, String, String) -> Unit) {}
 
     /**
      * GitHub 下载镜像（D-18）的可选值：`direct` / `auto` / 具体镜像前缀。
@@ -209,10 +216,14 @@ object GitHubMirrorChoice {
 /**
  * 云盘解析器实现。
  *
- * 平台 Repository 按平台缓存：`LanzouResolveRepository` 会在内存里缓存分享页，
- * 每次重建会丢掉这个缓存，导致进子目录时报「会话已失效」。
- * 凭证是进程内动态值：登录态解析/取链时由 [useCredential] 设置，
- * tokenProvider 形式的仓库从此读取，cookie 形式的仓库由调用参数直接带入。
+ * 平台 Repository 按「平台 + 凭证」缓存：`LanzouResolveRepository` 会在内存里缓存分享页，
+ * 每次重建会丢掉这个缓存，导致进子目录时报「会话已失效」；按 key 缓存既保住这份缓存，
+ * 又让不同账号的并发请求各自持有**不可变凭证快照**（P2-10）。
+ *
+ * 旧实现把凭证放在服务级 `@Volatile var credential` 里，由 `useCredential` 在每次
+ * `createSession` / `listFiles` / `downloadLink` 开头覆盖，而 Repository 构造时的
+ * tokenProvider / accountProvider 闭包都读它：并发「浏览 + 批量取链」会串号。
+ * 现在凭证只走方法参数，不共享可变字段。
  */
 class CloudDriveService(
     /**
@@ -227,23 +238,18 @@ class CloudDriveService(
     private val repositoryOverride: ((SharePlatform) -> ShareResolveRepository)? = null,
 ) : CloudDriveApi {
 
-    @Volatile
-    private var credential: String = ""
-
     /** 刷新出的新凭证要写回哪儿（由 ViewModel 接到网盘列表的账号卡上） */
     @Volatile
-    private var credentialSink: ((SharePlatform, String) -> Unit)? = null
+    private var credentialSink: ((SharePlatform, String, String) -> Unit)? = null
 
-    private val repositories = ConcurrentHashMap<SharePlatform, ShareResolveRepository>()
+    /** P2-10：缓存键带上凭证，两个账号的并发请求不会共用同一个 Repository 实例 */
+    private data class RepositoryKey(val platform: SharePlatform, val credential: String)
 
-    fun useCredential(value: String) {
-        // 登录 Cookie 可能带中文 / emoji / 控制字符，移植层 *Api.kt 用 OkHttp 的
-        // `.header("Cookie", ...)` 施加时会直接抛异常；统一在凭证入站处清洗一次。
-        // 迅雷的 JSON 结构化凭证由 sanitizeCredentialForHeaders 放行，不会被编码坏。
-        credential = sanitizeCredentialForHeaders(value).trim()
-    }
+    private val repositories = ConcurrentHashMap<RepositoryKey, ShareResolveRepository>()
+    private val repositoryOrder = java.util.concurrent.ConcurrentLinkedQueue<RepositoryKey>()
+    private val repositoryLock = Any()
 
-    override fun bindCredentialSink(sink: (SharePlatform, String) -> Unit) {
+    override fun bindCredentialSink(sink: (SharePlatform, String, String) -> Unit) {
         credentialSink = sink
     }
 
@@ -252,12 +258,18 @@ class CloudDriveService(
      *
      * 网页登录拿到的 token 只能用**网页** client_id 刷新（[XunleiWebCredential.AUTH_TYPE]），
      * 用 App 通道那一套会被直接拒，表现就是「刚登录就过期」。
-     * 刷新成功后立即写回：不写回的话，下一次 `accountProvider()` 读到的还是旧值。
+     * 刷新成功后立即写回账号池：不写回的话，账号卡片上仍是旧 token，下一次请求又会
+     * 被判过期。P2-10：写回时把**本次请求用的旧凭证**一并带出，账号池按旧值定位账号；
+     * 不再经服务级共享字段中转，避免并发时串号。
      *
      * @return 新 (access_token, refresh_token)；没有 refresh_token 或服务端拒绝时 null
      */
-    private suspend fun refreshXunleiToken(api: XunleiApi, deviceIdHint: String): Pair<String, String>? {
-        val current = XunleiDriveCredential.parse(credential) ?: return null
+    private suspend fun refreshXunleiToken(
+        api: XunleiApi,
+        deviceIdHint: String,
+        requestCredential: String,
+    ): Pair<String, String>? {
+        val current = XunleiDriveCredential.parse(requestCredential) ?: return null
         if (current.refreshToken.isBlank()) return null
         val device = deviceIdHint.ifBlank { current.deviceId }
         val fresh = api.refreshToken(current.refreshToken, device, XunleiWebCredential.AUTH_TYPE) ?: return null
@@ -267,8 +279,8 @@ class CloudDriveService(
             refreshToken = fresh.second.ifBlank { current.refreshToken },
         )
         val json = next.toJson()
-        credential = json
-        credentialSink?.invoke(SharePlatform.XUNLEI, json)
+        // P2-10：不再写 `credential = json`。旧凭证由调用链显式传入，刷新结果只经 sink 落库。
+        credentialSink?.invoke(SharePlatform.XUNLEI, requestCredential, json)
         return fresh.first to next.refreshToken
     }
 
@@ -403,11 +415,10 @@ class CloudDriveService(
         credential: String,
         platform: SharePlatform,
     ): ShareSession = withContext(Dispatchers.IO) {
-        useCredential(credential)
         if (platform == SharePlatform.GITHUB) {
             githubBrowser.createSession(link)
         } else {
-            repository(platform).createSession(link, passcode, credential).getOrThrow()
+            repository(platform, credential).createSession(link, passcode, credential).getOrThrow()
         }
     }
 
@@ -417,11 +428,10 @@ class CloudDriveService(
         credential: String,
         platform: SharePlatform,
     ): List<ShareFile> = withContext(Dispatchers.IO) {
-        useCredential(credential)
         if (platform == SharePlatform.GITHUB) {
             githubBrowser.listFiles(session, dirFid)
         } else {
-            repository(platform).listFiles(session, dirFid, credential).getOrThrow()
+            repository(platform, credential).listFiles(session, dirFid, credential).getOrThrow()
         }
     }
 
@@ -437,13 +447,12 @@ class CloudDriveService(
         credential: String,
         platform: SharePlatform,
     ): CloudLink = withContext(Dispatchers.IO) {
-        useCredential(credential)
         if (platform == SharePlatform.GITHUB) {
             // GitHub 不需要登录态取链：文件 fid 本身就是 raw / codeload / asset URL，
             // 走网盘 Repository 只会得到一张无意义的临时转存目录。
             return@withContext githubBrowser.downloadLink(session, file)
         }
-        val repo = repository(platform)
+        val repo = repository(platform, credential)
         val link: DownloadLink = if (credential.isBlank()) {
             repo.getGuestShareDownloadLink(session, file).getOrThrow()
         } else {
@@ -536,7 +545,7 @@ class CloudDriveService(
     ) {
         if (dirFid.isBlank()) return
         withContext(Dispatchers.IO) {
-            runCatching { repository(platform).cleanupTempDir(dirFid, credential) }
+            runCatching { repository(platform, credential).cleanupTempDir(dirFid, credential) }
                 .onFailure { e ->
                     top.mcly99.dl.utils.AppLogger.warn(
                         "CloudDriveService",
@@ -548,13 +557,33 @@ class CloudDriveService(
 
     /**
      * P4「我的网盘」复用同一批 Repository 来做「自己文件取直链 / 分享转存」。
-     * 调用方必须先 [useCredential] 同步当前账号；缓存里的 lambda 都是现取，
-     * 不会把上一个账号的凭证带过来。仅同模块可见，不改变 [CloudDriveApi] 契约。
+     *
+     * P2-10：凭证**按请求显式传入**，缓存键是「平台 + 凭证」，构造闭包捕获的是不可变
+     * 快照，不再有服务级可变字段。不同账号并发取链各用各的实例，从根上消除串号。
+     * 仅同模块可见，不改变 [CloudDriveApi] 契约。
      */
-    internal fun repository(platform: SharePlatform): ShareResolveRepository =
-        repositories.getOrPut(platform) { repositoryOverride?.invoke(platform) ?: createRepository(platform) }
+    internal fun repository(platform: SharePlatform, credential: String): ShareResolveRepository {
+        // 入站清洗一次：Cookie 可能带中文 / 控制字符，OkHttp 的 header() 会直接抛异常；
+        // 迅雷的结构化 JSON 凭证由 sanitizeCredentialForHeaders 放行，不会被编码坏。
+        val key = RepositoryKey(platform, sanitizeCredentialForHeaders(credential).trim())
+        repositories[key]?.let { return it }
+        return synchronized(repositoryLock) {
+            repositories[key]?.let { return@synchronized it }
+            val created = repositoryOverride?.invoke(platform)
+                ?: createRepository(platform, key.credential)
+            repositories[key] = created
+            repositoryOrder.add(key)
+            // 账号轮换会累积 key；按插入顺序淘汰最旧的，避免长期运行内存无界增长。
+            // 正常场景每个平台只有「游客 + 主账号 + 少量轮换账号」几个 key，不会触发。
+            while (repositoryOrder.size > MAX_CACHED_REPOSITORIES) {
+                val oldest = repositoryOrder.poll() ?: break
+                if (oldest != key) repositories.remove(oldest)
+            }
+            created
+        }
+    }
 
-    private fun createRepository(platform: SharePlatform): ShareResolveRepository = when (platform) {
+    private fun createRepository(platform: SharePlatform, credential: String): ShareResolveRepository = when (platform) {
         SharePlatform.QUARK -> QuarkResolveRepository(QuarkApi())
         SharePlatform.UC -> UCResolveRepository(UCApi())
         SharePlatform.BAIDU -> BaiduResolveRepository(BaiduApi())
@@ -566,12 +595,14 @@ class CloudDriveService(
         SharePlatform.ILANZOU -> ILanzouResolveRepository(ILanzouApi(), ILanzouAccountRepository())
         // 迅雷：凭证是「access_token + refresh_token + device_id」三件套，
         // 光有 Cookie 串走不通（接口只认 Bearer），所以先经 [XunleiDriveCredential] 收敛。
-        // 凭证随时可能被登录页覆盖，一律用 lambda 现取，不在构造时固化。
+        // P2-10：这里捕获的是本 Repository 自己的凭证快照；换账号会走到新的缓存 key，
+        // 刷新出的新 token 经 credentialSink 写回账号池，下一次请求自然用新 key。
         SharePlatform.XUNLEI -> {
             val xunleiApi = XunleiApi()
             fun tokens(): XunleiDriveCredential? = XunleiDriveCredential.parse(credential)
 
             // 网页 token 的 captcha 只能用网页 9 盐现签，App 通道的签名会被判 client_id not match
+            // P2-10：tokens() 解析的是本次 Repository 自己的凭证快照，不是共享可变字段
             xunleiApi.webCaptchaRefresher = { deviceId, action ->
                 val id = deviceId.ifBlank { tokens()?.deviceId.orEmpty() }
                 when (val result = xunleiApi.initWebCaptcha(id, action)) {
@@ -595,14 +626,14 @@ class CloudDriveService(
                 }
             }
             // 请求侧 401 / unauthenticated 的兜底刷新（与仓库层的主动刷新同一条路）
-            xunleiApi.refreshTokenProvider = { deviceId -> refreshXunleiToken(xunleiApi, deviceId) }
+            xunleiApi.refreshTokenProvider = { deviceId -> refreshXunleiToken(xunleiApi, deviceId, credential) }
 
             XunleiResolveRepository(
                 api = xunleiApi,
                 accountProvider = { tokens()?.accessToken?.takeIf { it.isNotBlank() } },
                 deviceIdProvider = { tokens()?.deviceId?.takeIf { it.isNotBlank() } },
                 captchaProvider = { null },
-                refreshProvider = { refreshXunleiToken(xunleiApi, "") },
+                refreshProvider = { refreshXunleiToken(xunleiApi, "", credential) },
             ).apply {
                 // 多账号下载（实验性 C1/C2）传给仓库的是目标账号的「凭证原文」（结构化 JSON /
                 // Cookie 串），不是裸 access_token。这里直接解析出该账号自己的三件套，

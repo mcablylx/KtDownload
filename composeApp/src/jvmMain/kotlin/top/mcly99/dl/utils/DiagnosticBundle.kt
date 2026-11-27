@@ -95,6 +95,9 @@ object DiagnosticBundle {
             for (log in recentLogs) zip.putFile(log, "logs/${log.fileName}")
             for (log in crashLogs) zip.putFile(log, "crash/${log.fileName}")
         }
+        // P2-14：诊断包含 app-*.log / jcef.log 原文（虽已尽力脱敏），落盘后按平台能力
+        // 收紧到仅当前用户可读，避免放在共享目录时被同机其它进程顺手拷走。
+        FilePermissions.hardenFile(target)
         return target
     }
 

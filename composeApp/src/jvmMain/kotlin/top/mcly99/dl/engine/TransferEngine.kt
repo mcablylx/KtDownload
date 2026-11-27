@@ -63,7 +63,18 @@ class TransferEngine(
     /** 文件传输端口（协议参数，双方一致）；测试可传入临时端口 */
     private val transferPort: Int = AppConstants.TRANSFER_PORT,
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    /**
+     * P2-03：启停串行化 + 可重建的生命周期作用域。
+     *
+     * 原来 `if (job?.isActive != true) startXxx()` 是 check-then-act：两个线程同时看到
+     * 「没在跑」会各自 launch 一个 Job，后者覆盖字段，前者留下的监听 socket 再也关不掉。
+     * 所有读写都收进 [lifecycleLock]；[stop] 则整批 cancel [lifecycleJob] 并重建作用域，
+     * 这样 accept 子协程、广播/监听子协程、以及旧 Job 的 finally 都不会把新 start 的状态
+     * 覆盖回去（用 `scope === myScope` 做发布守卫）。
+     */
+    private val lifecycleLock = Any()
+    private var lifecycleJob = SupervisorJob()
+    private var scope = CoroutineScope(Dispatchers.IO + lifecycleJob)
     private var discoveryJob: Job? = null
     private var serverJob: Job? = null
     
@@ -139,8 +150,11 @@ class TransferEngine(
      * 启动引擎（开始发现设备和接收文件）
      */
     fun start() {
-        if (discoveryJob?.isActive != true) startDiscovery()
-        if (serverJob?.isActive != true) startFileServer()
+        // P2-03：check-then-act 必须在同一把锁里完成，否则并发 start 会互相覆盖 Job 引用
+        synchronized(lifecycleLock) {
+            if (discoveryJob?.isActive != true) startDiscovery()
+            if (serverJob?.isActive != true) startFileServer()
+        }
     }
 
     /** 设备发现开关（对应设置中的「设备发现」），变化时即时启停 UDP 发现 */
@@ -153,38 +167,53 @@ class TransferEngine(
      * 开启时重新绑定端口。（文件接收服务不受此开关影响）
      */
     fun setDiscoveryEnabled(enabled: Boolean) {
-        if (discoveryEnabled == enabled && (enabled == (discoveryJob?.isActive == true))) return
-        discoveryEnabled = enabled
-        if (enabled) {
-            start()
-        } else {
-            discoveryJob?.cancel()
-            discoveryJob = null
-            runCatching { discoverySocket?.close() }
-            discoverySocket = null
-            discoveryRunning = false
-            discoveredDevices.keys.toList().forEach { id ->
-                discoveredDevices.remove(id)
-                onDeviceLost(id)
+        synchronized(lifecycleLock) {
+            if (discoveryEnabled == enabled && (enabled == (discoveryJob?.isActive == true))) {
+                return@synchronized
+            }
+            discoveryEnabled = enabled
+            if (enabled) {
+                start()
+            } else {
+                discoveryJob?.cancel()
+                discoveryJob = null
+                runCatching { discoverySocket?.close() }
+                discoverySocket = null
+                discoveryRunning = false
+                discoveredDevices.keys.toList().forEach { id ->
+                    discoveredDevices.remove(id)
+                    onDeviceLost(id)
+                }
             }
         }
     }
-    
+
     /**
-     * 停止引擎：取消监听的同时关闭 socket，确保阻塞中的 accept()/receive() 立即返回
+     * 停止引擎：取消监听的同时关闭 socket，确保阻塞中的 accept()/receive() 立即返回。
+     *
+     * P2-03：不再只 cancel 两个根 Job —— 它们派生出的 accept 子协程、广播/监听子协程
+     * 与旧 Job 的 finally 都可能在 stop 之后才写状态。这里整批 cancel [lifecycleJob]
+     * 并重建作用域；`startDiscovery` / `startFileServer` 用 scope 快照做发布守卫。
      */
     fun stop() {
-        discoveryJob?.cancel()
-        serverJob?.cancel()
-        discoveryJob = null
-        serverJob = null
-        closeQuietly(discoverySocket, "TransferEngine")
-        discoverySocket = null
-        closeQuietly(serverSocket, "TransferEngine")
-        serverSocket = null
-        // P1-09 / P2-03：已 accept 的连接此前一律不关，只靠 soTimeout 兜底；现在显式关闭
-        acceptedSockets.forEach { closeQuietly(it, "TransferEngine") }
-        acceptedSockets.clear()
+        synchronized(lifecycleLock) {
+            discoveryJob?.cancel()
+            serverJob?.cancel()
+            discoveryJob = null
+            serverJob = null
+            lifecycleJob.cancel()
+            lifecycleJob = SupervisorJob()
+            scope = CoroutineScope(Dispatchers.IO + lifecycleJob)
+            closeQuietly(discoverySocket, "TransferEngine")
+            discoverySocket = null
+            closeQuietly(serverSocket, "TransferEngine")
+            serverSocket = null
+            discoveryRunning = false
+            fileServerRunning = false
+            // P1-09 / P2-03：已 accept 的连接此前一律不关，只靠 soTimeout 兜底；现在显式关闭
+            acceptedSockets.forEach { closeQuietly(it, "TransferEngine") }
+            acceptedSockets.clear()
+        }
     }
     
     /**
@@ -202,17 +231,29 @@ class TransferEngine(
             discoveryRunning = false
             return
         }
-        discoveryJob = scope.launch {
+        // P2-03：捕获本次启动的作用域快照，stop() 会重建 scope；旧 Job 结束后不得把
+        // 新作用域的 discoverySocket / discoveryRunning 覆盖掉。
+        val myScope = scope
+        discoveryJob = myScope.launch {
             // 先绑定端口：失败时只停用设备发现，不能让整个应用崩溃
             val socket = try {
-                DatagramSocket(AppConstants.DISCOVERY_PORT).also {
-                    it.reuseAddress = true
-                    discoverySocket = it
-                    discoveryRunning = true
-                }
+                DatagramSocket(AppConstants.DISCOVERY_PORT).apply { reuseAddress = true }
             } catch (e: Exception) {
-                discoveryRunning = false
+                synchronized(lifecycleLock) { if (scope === myScope) discoveryRunning = false }
                 AppLogger.warn("TransferEngine", "设备发现不可用：UDP ${AppConstants.DISCOVERY_PORT} 绑定失败(${e.message})，功能降级运行", e)
+                return@launch
+            }
+            val published = synchronized(lifecycleLock) {
+                if (scope !== myScope) false
+                else {
+                    discoverySocket = socket
+                    discoveryRunning = true
+                    true
+                }
+            }
+            if (!published) {
+                // stop 已经发生：这个 socket 不属于新作用域，直接回收
+                closeQuietly(socket, "TransferEngine")
                 return@launch
             }
             try {
@@ -226,9 +267,13 @@ class TransferEngine(
                     delay(AppConstants.BROADCAST_INTERVAL_MS)
                 }
             } finally {
+                synchronized(lifecycleLock) {
+                    if (scope === myScope) {
+                        discoverySocket = null
+                        discoveryRunning = false
+                    }
+                }
                 closeQuietly(socket, "TransferEngine")
-                discoverySocket = null
-                discoveryRunning = false
             }
         }
     }
@@ -360,19 +405,30 @@ class TransferEngine(
      * 启动文件接收服务器
      */
     private fun startFileServer() {
-        serverJob = scope.launch {
+        // P2-03：同 startDiscovery，用作用域快照做发布守卫
+        val myScope = scope
+        serverJob = myScope.launch {
             // 端口占用时只停用文件接收，不影响界面与其它功能
             val ss = try {
                 ServerSocket().apply {
                     reuseAddress = true
                     bind(java.net.InetSocketAddress(transferPort), 50)
-                }.also {
-                    serverSocket = it
-                    fileServerRunning = true
                 }
             } catch (e: Exception) {
-                fileServerRunning = false
+                synchronized(lifecycleLock) { if (scope === myScope) fileServerRunning = false }
                 AppLogger.warn("TransferEngine", "文件接收不可用：TCP ${AppConstants.TRANSFER_PORT} 绑定失败(${e.message})，功能降级运行", e)
+                return@launch
+            }
+            val published = synchronized(lifecycleLock) {
+                if (scope !== myScope) false
+                else {
+                    serverSocket = ss
+                    fileServerRunning = true
+                    true
+                }
+            }
+            if (!published) {
+                closeQuietly(ss, "TransferEngine")
                 return@launch
             }
             try {
@@ -398,9 +454,13 @@ class TransferEngine(
                     }
                 }
             } finally {
+                synchronized(lifecycleLock) {
+                    if (scope === myScope) {
+                        serverSocket = null
+                        fileServerRunning = false
+                    }
+                }
                 closeQuietly(ss, "TransferEngine")
-                serverSocket = null
-                fileServerRunning = false
             }
         }
     }

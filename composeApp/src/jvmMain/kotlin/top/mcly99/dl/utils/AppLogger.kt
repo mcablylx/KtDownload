@@ -125,15 +125,20 @@ private class DailyFileHandler(private val directory: Path) : Handler() {
         if (existing != null && day == currentDay) return existing
         closeWriter()
         Files.createDirectories(directory)
+        // P2-14：日志会被诊断包原样收走，落盘前脱敏只是「尽力而为」，目录与文件本身
+        // 也应按平台能力收紧（POSIX 0700/0600；Windows 读 ACL 并对宽泛主体明确告警）。
+        FilePermissions.hardenDirectory(directory)
         // 首次写入或跨天时顺带清理过期日志，避免磁盘无限增长
         pruneOldLogs(directory, day)
         currentDay = day
+        val logFile = directory.resolve("app-$day.log")
         writer = Files.newBufferedWriter(
-            directory.resolve("app-$day.log"),
+            logFile,
             StandardOpenOption.CREATE,
             StandardOpenOption.APPEND,
             StandardOpenOption.WRITE,
         )
+        FilePermissions.hardenFile(logFile)
         return writer!!
     }
 
