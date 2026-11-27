@@ -70,7 +70,13 @@ data class PanCaptcha(val token: String, val expiresAtMs: Long) {
 sealed interface WebCaptchaInit {
     data class Ok(val captcha: PanCaptcha) : WebCaptchaInit
     data object ClientIdMismatch : WebCaptchaInit
-    data class Failed(val reason: WebCaptchaFailure) : WebCaptchaInit
+
+    /**
+     * @param retryAfterMs 服务端 `Retry-After` 给出的等待时间（毫秒）；0 表示「没给或解析不出」，
+     *   由调用方用默认冷却。P2-08：只判到 `RATE_LIMITED` 而不带等待时长，UI 只能说「稍后重试」，
+     *   用户往往几秒后连点，反而把限流窗口越拉越长。
+     */
+    data class Failed(val reason: WebCaptchaFailure, val retryAfterMs: Long = 0) : WebCaptchaInit
 }
 
 /** 网页 captcha/init 的失败原因（用于错误文案与自愈决策，不含任何凭证）。 */
@@ -93,7 +99,12 @@ enum class WebCaptchaFailure {
  * - Pan：文件列表 / 分享解析 / 转存 / 直链（Bearer 认证，无需 x-signature，抓包确认）
  */
 class XunleiApi(
-    private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() }
+    private val clientProvider: () -> OkHttpClient = { HttpClients.apiClient() },
+    /**
+     * 时钟（毫秒）。限流冷却与 captcha 过期都用它判定，单测注入假时钟即可验证
+     * 「冷却期内不再发请求 / 冷却结束后恢复」，不需要真的 sleep（P2-08）。
+     */
+    private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
     /** 每次请求动态获取全局客户端（忽略 SSL 开关切换即时生效） */
     private val client get() = clientProvider()
@@ -101,12 +112,53 @@ class XunleiApi(
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
     private val formMediaType = "application/x-www-form-urlencoded".toMediaType()
 
-    /** 刷新出的 captcha（按设备号缓存：不同账号的 captcha 不能串用，App 通道与网页通道的
-     *  client_id 也不同，串用会直接得到 client_id not match）。带过期时间，过期的不会被再用 */
+    /**
+     * 刷新出的 captcha，键是 **设备号 + action + 账号**（见 [captchaCacheKey]）。
+     *
+     * ★ P2-08：早期版本只按 `deviceId` 缓存，而 `captcha/init` 的 body 带 `action`、
+     * `meta.user_id`，服务端签发的 token 与这两者绑定。只按设备号缓存会出现两种串用：
+     * 1. 同一账号先列目录（`GET:/drive/v1/files`）再删文件（`POST:/drive/v1/files:batchDelete`），
+     *    第二次直接复用第一次的 token，服务端判 `captcha_invalid`，白撞一次失败再重签；
+     * 2. 多账号共用同一台设备号（网页登录的 device_id 来自浏览器配置）时，B 账号复用 A 的
+     *    token，拿到的是「给 A 的验证」，写操作被降级拒绝，错误文案完全指不到这里。
+     */
     private val refreshedCaptchas = java.util.concurrent.ConcurrentHashMap<String, PanCaptcha>()
 
-    /** 游客 captcha：按 (deviceId, action) 缓存，服务端只给 300s，过期重签 */
+    /** 游客 captcha：按 (deviceId, action) 缓存，服务端只给 300s，过期重签（游客没有账号维度） */
     private val guestCaptchas = java.util.concurrent.ConcurrentHashMap<String, PanCaptcha>()
+
+    /**
+     * `captcha/init` 的限流冷却截止时间（毫秒）。
+     *
+     * P2-08：被 429 之后如果继续按「失败就重签」的逻辑重试，每次解析都会再打一次
+     * captcha/init，把限流窗口越拖越长（典型的请求放大）。所以这里记一个进程级冷却：
+     * 冷却期内 [initWebCaptcha] 直接返回 `RATE_LIMITED`，一个请求都不发。
+     * 服务端限流按 IP / 设备维度计，进程内全局冷却足够，且不会因为多账号而互相绕过。
+     */
+    @Volatile
+    private var captchaCooldownUntilMs: Long = 0L
+
+    /** 最近一次限流建议的等待毫秒数（0 = 服务端没给），仅用于文案，不含任何凭证 */
+    @Volatile
+    var lastWebCaptchaRetryAfterMs: Long = 0L
+        private set
+
+    /** 冷却剩余毫秒（0 = 未在冷却） */
+    internal fun captchaCooldownRemainingMs(now: Long = clock()): Long =
+        (captchaCooldownUntilMs - now).coerceAtLeast(0L)
+
+    /**
+     * 记录一次限流冷却：`Retry-After` 优先，没给就用默认值，并封顶防异常响应头。
+     *
+     * 三条 captcha 通道（网页 9 盐、App 登录、App pan 重签）共用同一张保护表：它们打的是
+     * 同一个 `captcha/init` 接口，服务端按 IP / 设备计限流，分开记等于没记。
+     */
+    private fun markCaptchaRateLimited(retryAfterMs: Long) {
+        val wait = (retryAfterMs.takeIf { it > 0 } ?: DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+            .coerceAtMost(MAX_RATE_LIMIT_COOLDOWN_MS)
+        captchaCooldownUntilMs = clock() + wait
+        lastWebCaptchaRetryAfterMs = wait
+    }
 
     // 注意：access_token 一律按请求参数传递，不再用实例级全局缓存。
     // 旧实现用 currentAccessToken 覆盖传入 token，导致多账号下载时 A 账号凭证被 B 账号覆盖（P0-2）。
@@ -182,6 +234,17 @@ class XunleiApi(
             .build()
         runCatching {
             client.newCall(request).execute().use { resp ->
+                // P2-08：非 2xx 不再硬塞进 JSONObject——错误页（HTML）解析必抛异常，
+                // 又被外层 runCatching 压成 null，最后只能报「请求参数错误」，限流/网关错误全看不出来。
+                // 登录是人主动触发的一次性动作，这里只记录冷却、不短路（短路会让点登录毫无反应）。
+                val retryAfter = resp.header("Retry-After")
+                if (resp.code == 429 || (retryAfter != null && !resp.isSuccessful)) {
+                    markCaptchaRateLimited(
+                        retryAfter?.trim()?.toLongOrNull()?.takeIf { it > 0 }?.times(1000L) ?: 0L
+                    )
+                    return@use null
+                }
+                if (!resp.isSuccessful) return@use null
                 val json = JSONObject(resp.body?.string() ?: "{}")
                 json.optString("captcha_token").takeIf { it.isNotBlank() }
             }
@@ -948,6 +1011,30 @@ class XunleiApi(
         }
     }
 
+    /**
+     * captcha 缓存键：设备号 + action + 账号。
+     *
+     * 三个维度都参与，是因为服务端签发的 token 与它们绑定：
+     * - `device_id` 参与 body 与 `X-Device-Id`，换设备必须重签；
+     * - `action` 参与 body（`GET:/drive/v1/files` 的 token 拿去发 `POST:` 会被判 `captcha_invalid`）；
+     * - `meta.user_id` 参与签名，A 账号的 token 给 B 用只会拿到降级/被拒的验证。
+     *
+     * `userId` 允许为空串：登录前 `currentUserId` 尚未解析出来，此时按「匿名」这一档单独缓存，
+     * 等账号信息补上后会自然换到新键，不会把匿名档的 token 当成账号档复用。
+     */
+    private fun captchaCacheKey(deviceId: String, action: String, userId: String): String =
+        "$deviceId|$action|$userId"
+
+    /** 写入 captcha 缓存，并按 [CAPTCHA_CACHE_LIMIT] 收敛，避免「设备 × action × 账号」组合无界增长。 */
+    private fun storeCaptcha(key: String, captcha: PanCaptcha) {
+        if (refreshedCaptchas.size >= CAPTCHA_CACHE_LIMIT) {
+            val now = clock()
+            refreshedCaptchas.entries.removeAll { !it.value.isValid(now) }
+            if (refreshedCaptchas.size >= CAPTCHA_CACHE_LIMIT) refreshedCaptchas.clear()
+        }
+        refreshedCaptchas[key] = captcha
+    }
+
     private suspend fun <T> panCallInternal(
         captchaToken: String,
         deviceId: String,
@@ -957,14 +1044,18 @@ class XunleiApi(
         build: (String, String) -> Request,
         parse: (JSONObject) -> T
     ): T {
+        // 账号快照：captcha/init 的 meta.user_id 取的就是这一刻的 currentUserId，
+        // 缓存键必须用同一份值，否则「按 A 签出的 token」会被记到 B 名下（P2-08）。
+        val userIdSnapshot = currentUserId
+        val captchaKey = captchaCacheKey(deviceId, action, userIdSnapshot)
         // 网页账号的 captcha 只有 300s：缓存里过期的绝不再用，直接换新的（本地签名，几百毫秒）。
         // 不这么做的话，每次解析都会先拿死 token 撞一次 captcha_invalid 再重试。
         var token = if (anonymous) {
             // 没有注入账号 captcha 时自签一个游客 token（迅雷匿名接口现在也必须带）
             captchaToken.takeIf { it.isNotBlank() } ?: guestCaptcha(deviceId, action)
         } else {
-            val cached = refreshedCaptchas[deviceId]?.takeIf { it.isValid() }
-            (cached ?: webCaptchaRefresher(deviceId, action)?.also { refreshedCaptchas[deviceId] = it })
+            val cached = refreshedCaptchas[captchaKey]?.takeIf { it.isValid(clock()) }
+            (cached ?: webCaptchaRefresher(deviceId, action)?.also { storeCaptcha(captchaKey, it) })
                 ?.token ?: captchaToken
         }
         // 本次调用的有效 token：初始为请求传入的那一份，401 刷新后仅更新到本次重试，
@@ -988,7 +1079,9 @@ class XunleiApi(
                         val newCaptcha = webCaptchaRefresher(deviceId, action)
                             ?: initPanCaptcha(deviceId, action, token)?.let { PanCaptcha(it, Long.MAX_VALUE) }
                         if (newCaptcha != null) {
-                            refreshedCaptchas[deviceId] = newCaptcha
+                            // 存的时候按「签发时的账号」重新算一次键：refreshTokenProvider 可能刚
+                            // 把 currentUserId 填上/换掉，用进入时的快照会记到别的账号名下
+                            storeCaptcha(captchaCacheKey(deviceId, action, currentUserId), newCaptcha)
                             token = newCaptcha.token
                         }
                         return@repeat
@@ -1005,7 +1098,7 @@ class XunleiApi(
                     val newCaptcha = webCaptchaRefresher(deviceId, action)
                         ?: initPanCaptcha(deviceId, action, token)?.let { PanCaptcha(it, Long.MAX_VALUE) }
                     if (newCaptcha != null) {
-                        refreshedCaptchas[deviceId] = newCaptcha
+                        storeCaptcha(captchaCacheKey(deviceId, action, currentUserId), newCaptcha)
                         token = newCaptcha.token
                         return@repeat
                     }
@@ -1030,8 +1123,12 @@ class XunleiApi(
                             "签名参数可能已过期，请点「去网页重新登录」后重试，或更新签名配置"
                         WebCaptchaFailure.CLIENT_ID_MISMATCH ->
                             "登录方式与验证码不匹配，请重新登录迅雷网页版"
-                        WebCaptchaFailure.RATE_LIMITED ->
-                            "验证请求被限流，请稍后再试（无需重新登录）"
+                        WebCaptchaFailure.RATE_LIMITED -> {
+                            // 带上具体等待时长：只说「稍后再试」用户会立刻连点，反而拉长限流窗口
+                            val waitSec = (lastWebCaptchaRetryAfterMs + 999) / 1000
+                            if (waitSec > 0) "验证请求被限流，请 $waitSec 秒后再试（无需重新登录）"
+                            else "验证请求被限流，请稍后再试（无需重新登录）"
+                        }
                         WebCaptchaFailure.NETWORK ->
                             "验证请求网络异常，请检查网络或代理后重试"
                         WebCaptchaFailure.HTTP_ERROR ->
@@ -1065,8 +1162,16 @@ class XunleiApi(
      */
     suspend fun initWebCaptcha(deviceId: String, action: String): WebCaptchaInit =
         withContext(Dispatchers.IO) {
+            // 冷却期（上一次被 429）内一个请求都不发：失败即重签的循环只会把限流窗口越拖越长
+            val cooling = captchaCooldownRemainingMs()
+            if (cooling > 0) {
+                noteWebCaptchaFailure(WebCaptchaFailure.RATE_LIMITED)
+                lastWebCaptchaRetryAfterMs = cooling
+                return@withContext WebCaptchaInit.Failed(WebCaptchaFailure.RATE_LIMITED, cooling)
+            }
+
             var config = XunleiWebSignConfig.current()
-            var result = runCatching { requestWebCaptcha(deviceId, action, config) }
+            var result = runCatching { requestWebCaptcha(deviceId, action, config, clock()) }
                 .getOrElse { WebCaptchaInit.Failed(WebCaptchaFailure.NETWORK) }
 
             // 运行时自愈（P1-02）：签名被拒说明 9 盐 / client_version 大概率已轮换。
@@ -1077,9 +1182,17 @@ class XunleiApi(
                 val reloaded = XunleiWebSignConfig.current()
                 if (reloaded != config) {
                     config = reloaded
-                    result = runCatching { requestWebCaptcha(deviceId, action, config) }
+                    result = runCatching { requestWebCaptcha(deviceId, action, config, clock()) }
                         .getOrElse { WebCaptchaInit.Failed(WebCaptchaFailure.NETWORK) }
                 }
+            }
+
+            // 被限流：按 Retry-After 记冷却（没给就用默认值，且封顶），
+            // 后续调用在冷却期内直接短路，不再消耗服务端配额（P2-08）。
+            if (result is WebCaptchaInit.Failed && result.reason == WebCaptchaFailure.RATE_LIMITED) {
+                markCaptchaRateLimited(result.retryAfterMs)
+            } else if (result is WebCaptchaInit.Ok) {
+                lastWebCaptchaRetryAfterMs = 0L
             }
 
             noteWebCaptchaFailure(
@@ -1093,8 +1206,13 @@ class XunleiApi(
         }
 
     /** 单次 captcha/init 请求与响应分类（纯网络逻辑，便于 fake client 单测）。 */
-    private fun requestWebCaptcha(deviceId: String, action: String, config: WebSignConfig): WebCaptchaInit {
-        val ts = System.currentTimeMillis()
+    private fun requestWebCaptcha(
+        deviceId: String,
+        action: String,
+        config: WebSignConfig,
+        now: Long
+    ): WebCaptchaInit {
+        val ts = now
         val sign = XunleiWebCredential.computeCaptchaSign(deviceId, ts, config)
         val body = JSONObject()
             .put("client_id", XunleiWebCredential.CLIENT_ID)
@@ -1129,9 +1247,15 @@ class XunleiApi(
             if (blob.contains("client_id not match", ignoreCase = true)) {
                 return WebCaptchaInit.ClientIdMismatch
             }
-            // 限流优先于 HTTP 状态判断：429 常带业务体，Retry-After 要给 UI 一个明确信号
-            if (resp.code == 429 || resp.header("Retry-After") != null) {
-                return WebCaptchaInit.Failed(WebCaptchaFailure.RATE_LIMITED)
+            // 限流优先于 HTTP 状态判断：429 常带业务体，Retry-After 要给 UI 一个明确信号。
+            // 注意只认「被拒绝」（非 2xx）的 Retry-After：200 上带这个头只是提示，不是拒绝，
+            // 早期写法 `header != null` 会把带该头的正常响应整条误判成限流（P2-08）。
+            val retryAfterHeader = resp.header("Retry-After")
+            if (resp.code == 429 || (retryAfterHeader != null && !resp.isSuccessful)) {
+                // 只解析 delta-seconds 形态；HTTP-date 形态（极少见）交给默认冷却兜底
+                val retryAfterMs = retryAfterHeader?.trim()?.toLongOrNull()
+                    ?.takeIf { it > 0 }?.times(1000L) ?: 0L
+                return WebCaptchaInit.Failed(WebCaptchaFailure.RATE_LIMITED, retryAfterMs)
             }
             if (!resp.isSuccessful) {
                 return WebCaptchaInit.Failed(WebCaptchaFailure.HTTP_ERROR)
@@ -1184,6 +1308,15 @@ class XunleiApi(
                 .build()
             runCatching {
                 client.newCall(request).execute().use { resp ->
+                    // 同 initCaptcha：先判 HTTP，再判限流；错误页不进 JSONObject（P2-08）
+                    val retryAfter = resp.header("Retry-After")
+                    if (resp.code == 429 || (retryAfter != null && !resp.isSuccessful)) {
+                        markCaptchaRateLimited(
+                            retryAfter?.trim()?.toLongOrNull()?.takeIf { it > 0 }?.times(1000L) ?: 0L
+                        )
+                        return@use null
+                    }
+                    if (!resp.isSuccessful) return@use null
                     val json = JSONObject(resp.body?.string() ?: "{}")
                     json.optString("captcha_token").takeIf { it.isNotBlank() }
                 }
@@ -1236,6 +1369,15 @@ class XunleiApi(
     }
 
     companion object {
+        /** captcha 缓存的键数量上限：超过就先清过期项，仍超则整体清空（token 只有 300s，重建代价几百毫秒） */
+        private const val CAPTCHA_CACHE_LIMIT = 64
+
+        /** 服务端没给 `Retry-After` 时的默认冷却（秒级抖动足够，不要立即重试） */
+        private const val DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000L
+
+        /** 冷却上限：防止异常响应头（如 `Retry-After: 86400`）把功能锁死一整天 */
+        private const val MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60_000L
+
         /** 设备 ID：动态生成的设备指纹（进程启动时由 Application 初始化并持久化） */
         fun newDeviceId(): String = XunleiDeviceFingerprint.deviceId()
 
