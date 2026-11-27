@@ -1,6 +1,6 @@
 # KtDownload 使用与开发说明
 
-> 当前版本：**1.0.3**（发版时需与 `gradle.properties` 的 `appVersion` 同步；应用内版本由构建期生成的 `APP_VERSION` 注入，见 `composeApp/build.gradle.kts` 的 `generateVersionFile`）  
+> 当前版本：**1.0.4**（发版时需与 `gradle.properties` 的 `appVersion` 同步；应用内版本由构建期生成的 `APP_VERSION` 注入，见 `composeApp/build.gradle.kts` 的 `generateVersionFile`）  
 > 工程名称：`KtDownload`  
 > 应用名称：KtDownload  
 > 开源协议：**GNU Affero General Public License v3.0（AGPL-3.0）**  
