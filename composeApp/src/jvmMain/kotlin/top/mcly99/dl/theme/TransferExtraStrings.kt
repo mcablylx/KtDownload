@@ -31,6 +31,8 @@ data class TransferExtraStrings(
     val copiedIp: (String) -> String,
     /** 设备未开启 Web 上传时，端口位置显示的占位说明 */
     val webPortUnknown: String,
+    /** P1-09：接收服务只在可信局域网内使用，不能暴露到公网 */
+    val trustedLanOnly: String,
 )
 
 fun transferExtraStrings(language: String): TransferExtraStrings =
@@ -46,6 +48,7 @@ private val zhCNTransferExtra = TransferExtraStrings(
     copyIp = "复制 IP",
     copiedIp = { ip -> "已复制：$ip" },
     webPortUnknown = "对方的 Web 上传未开启",
+    trustedLanOnly = "仅可在可信局域网内使用；请勿把接收地址发到公网",
 )
 
 private val enUSTransferExtra = TransferExtraStrings(
@@ -58,4 +61,5 @@ private val enUSTransferExtra = TransferExtraStrings(
     copyIp = "Copy IP",
     copiedIp = { ip -> "Copied: $ip" },
     webPortUnknown = "Web upload is off on that device",
+    trustedLanOnly = "Trusted LAN only; do not share the receive address on the public internet",
 )

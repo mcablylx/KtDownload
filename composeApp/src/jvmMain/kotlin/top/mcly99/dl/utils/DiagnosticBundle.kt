@@ -26,9 +26,9 @@ import java.util.zip.ZipOutputStream
  * - `manifest.txt`：本次打包了哪些文件、明确声明「不含网盘凭证」。
  *
  * **绝不打包凭证文件**：`cloud-credentials.*` / `cloud-accounts.properties` / 任务存储里的
- * Cookie（本来就不落盘）。但日志（`app-*.log` / `jcef.log`）会原样收进来：它们在
- * [SensitiveTextRedactor] 落盘时已尽力脱敏，自由文本仍可能残留隐私，manifest 会如实提示
- * 用户发送前审阅（P1-07）。
+ * Cookie（本来就不落盘）。日志（`app-*.log` / `jcef.log`）虽在 [SensitiveTextRedactor]
+ * 落盘时已尽力脱敏，导出时仍会**再逐行脱敏一遍**：日志可能由 jcef / JVM 崩溃处理器等
+ * 非 [AppLogger] 通道写入，不能假设落盘路径都过了脱敏。manifest 保留审阅提示（P1-07）。
  */
 object DiagnosticBundle {
 
@@ -79,21 +79,22 @@ object DiagnosticBundle {
             crashLogs.forEach { appendLine("  crash/${it.fileName}") }
             appendLine()
             // P1-07：如实声明。1.0.3 写「不含任何 cookies/tokens」，但 app-*.log 与 jcef.log
-            // 是原样收进包的，日志里可能残留 URL 或自由文本里的敏感信息。现在日志在落盘前已
-            // 统一脱敏（SensitiveTextRedactor），但这不是绝对保证，必须提示用户发送前先审阅。
+            // 确实会进包。现在日志在落盘前统一脱敏，导出时又逐行脱敏一次；自由文本仍可能
+            // 残留隐私，所以保留「发送前审阅」提示，不做绝对保证。
             appendLine("NO cloud-drive credentials, cookies or token STORES are packaged:")
             appendLine("  cloud-credentials.* and cloud-accounts.properties are explicitly excluded.")
-            appendLine("Application logs (app-*.log, jcef.log) are included. Sensitive fields and URL")
-            appendLine("query strings are redacted on a best-effort basis, but free-form messages may")
-            appendLine("still contain private data. Please review the logs before sharing this bundle.")
+            appendLine("Application logs (app-*.log, jcef.log) are included. Every line is redacted")
+            appendLine("again at export time (sensitive fields and URL query strings), but free-form")
+            appendLine("messages may still contain private data. Review the logs before sharing.")
         }
 
         ZipOutputStream(Files.newOutputStream(target)).use { zip ->
             zip.put("manifest.txt", manifest)
             zip.put("environment.txt", environment)
             zip.put("settings.txt", settingsSnapshot(settings))
-            for (log in recentLogs) zip.putFile(log, "logs/${log.fileName}")
-            for (log in crashLogs) zip.putFile(log, "crash/${log.fileName}")
+            // P1-07：入包前再过一次脱敏，覆盖 jcef / JVM 等不经过 AppLogger 的写入方。
+            for (log in recentLogs) zip.putRedactedLog(log, "logs/${log.fileName}")
+            for (log in crashLogs) zip.putRedactedLog(log, "crash/${log.fileName}")
         }
         // P2-14：诊断包含 app-*.log / jcef.log 原文（虽已尽力脱敏），落盘后按平台能力
         // 收紧到仅当前用户可读，避免放在共享目录时被同机其它进程顺手拷走。
@@ -173,7 +174,10 @@ object DiagnosticBundle {
 
         // jcef.log 不是按天的，单独收；它记的是内嵌浏览器内核的启动/崩溃信息
         val jcef = logDir.resolve("jcef.log").takeIf { Files.isRegularFile(it) }
-        return if (jcef == null) dated else dated + jcef
+        // 注意：java.nio.file.Path 实现了 Iterable<Path>，`dated + jcef` 会走
+        // Iterable 重载、把绝对路径拆成一段段相对路径（Users/Administrator/.../jcef.log），
+        // 结果 jcef.log 条目永远是空文件。必须显式包成单元素列表。
+        return if (jcef == null) dated else dated + listOf(jcef)
     }
 
     private fun collectCrashLogs(dataDir: Path): List<Path> {
@@ -208,10 +212,21 @@ object DiagnosticBundle {
         closeEntry()
     }
 
-    private fun ZipOutputStream.putFile(file: Path, name: String) {
+    /**
+     * 日志入包前逐行脱敏。
+     *
+     * 不 whole-file 读入内存：jcef.log 可能几十 MB，按行流式写出即可。
+     * 行尾统一成 `\n`，诊断包是纯文本，跨平台查看更稳定。
+     */
+    private fun ZipOutputStream.putRedactedLog(file: Path, name: String) {
         runCatching {
             putNextEntry(ZipEntry(name))
-            Files.newInputStream(file).use { input -> input.copyTo(this) }
+            Files.newBufferedReader(file, StandardCharsets.UTF_8).useLines { lines ->
+                lines.forEach { line ->
+                    write(SensitiveTextRedactor.redact(line).toByteArray(StandardCharsets.UTF_8))
+                    write('\n'.code)
+                }
+            }
             closeEntry()
         }.onFailure {
             // 单个文件读失败（被占用 / 权限）不该让整个诊断包失败

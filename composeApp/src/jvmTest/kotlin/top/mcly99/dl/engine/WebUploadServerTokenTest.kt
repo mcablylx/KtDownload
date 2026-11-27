@@ -17,7 +17,8 @@ import kotlin.test.assertTrue
  * P2-18 回归：网页上传访问令牌的强度、轮转、常量时间比较与失败限速。
  *
  * 旧实现：UUID 前 16 hex = **64 bit**、进程内不轮转、`==` 非常量时间、失败无限速、
- * 令牌走 URL query 且内嵌进上传页 JS。这里用本机 HttpServer + 假时钟验证修复，不发外网请求。
+ * 令牌走 URL query 且内嵌进上传页 JS。现在令牌只在一次性引导路径出现，换 HttpOnly 会话
+ * Cookie 后上传页与上传请求都不再持有令牌；这里用本机 HttpServer + 假时钟验证，不发外网请求。
  */
 class WebUploadServerTokenTest {
 
@@ -175,24 +176,102 @@ class WebUploadServerTokenTest {
         assertFalse(invalid.start(freePort()), "不可解析的 bindHost 不应降级成全网卡监听")
     }
 
+    @Test
+    fun bootstrap_exchanges_token_for_httponly_cookie_redirects_to_token_free_url() {
+        val server = newServer()
+        val port = freePort()
+        assertTrue(server.start(port))
+
+        val result = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, result.code)
+        val location = result.headers.entries.first { it.key.equals("Location", ignoreCase = true) }.value
+        assertEquals("/", location.trim(), "登录后地址栏应回到无 token 的 /")
+        val setCookie = result.headers.entries.first { it.key.equals("Set-Cookie", ignoreCase = true) }.value
+        assertTrue(setCookie.contains("HttpOnly"), setCookie)
+        assertTrue(setCookie.contains("SameSite=Lax"), setCookie)
+        assertTrue(setCookie.contains("Path=/"), setCookie)
+        assertFalse(setCookie.contains("Secure=true"), "局域网 http 场景不加 Secure，源码注释需如实说明")
+        assertTrue(result.cookie!!.startsWith("${WebUploadServer.SESSION_COOKIE}="), result.cookie)
+        assertFalse(result.cookie.contains(server.accessToken), "Cookie 里不能再放引导令牌本体")
+
+        val (code, _, _) = getWithCookie(port, result.cookie)
+        assertEquals(200, code, "只带会话 Cookie 就该能打开上传页")
+    }
+
+    @Test
+    fun upload_page_script_never_contains_the_bootstrap_token() {
+        val server = newServer()
+        val port = freePort()
+        assertTrue(server.start(port))
+        val result = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, result.code)
+
+        val (code, _, html) = getWithCookie(port, result.cookie)
+        assertEquals(200, code)
+        assertFalse(html.contains(server.accessToken), "上传页 JS 不应再内嵌令牌")
+        assertTrue(html.contains("var uploadUrl = '/';"), "上传请求应走同源路径 + 会话 Cookie")
+    }
+
+    @Test
+    fun rotating_the_token_invalidates_sessions_issued_from_the_old_one() {
+        val server = newServer()
+        val port = freePort()
+        assertTrue(server.start(port))
+        val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, session.code)
+        assertEquals(200, getWithCookie(port, session.cookie).first)
+
+        server.rotateAccessToken()
+        assertEquals(403, getWithCookie(port, session.cookie).first, "令牌轮转后旧会话必须立即失效")
+        val fresh = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, fresh.code)
+        assertEquals(200, getWithCookie(port, fresh.cookie).first)
+    }
+
+    @Test
+    fun sessions_expire_on_the_injected_clock() {
+        val server = newServer()
+        val port = freePort()
+        assertTrue(server.start(port))
+        val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, session.code)
+
+        now += WebUploadServer.SESSION_TTL_MS + 1
+        assertEquals(403, getWithCookie(port, session.cookie).first, "空闲超时后会话应失效")
+    }
+
     // ---------------------------------------------------------------- 辅助
 
     /** @return HTTP 状态码 + 响应头（名称大小写按 JDK 返回原样） */
     private fun get(port: Int, token: String?): Pair<Int, Map<String, String>> {
-        val query = if (token == null) "" else "?token=$token"
-        val conn = (URL("http://127.0.0.1:$port/$query").openConnection() as HttpURLConnection).apply {
+        // 引导失败时直接返回引导响应：锁定（429）必须能被子用例观察到，
+        // 不能退化成「无 Cookie 访问 / 的 403」，否则限速回归会失真。
+        val bootstrap = WebUploadTestSession.bootstrap(port, token)
+        if (bootstrap.code != 302) return bootstrap.code to bootstrap.headers
+
+        val (code, headers, _) = getWithCookie(port, bootstrap.cookie)
+        return code to headers
+    }
+
+    /** 不带引导令牌、只带会话 Cookie 访问上传页，返回状态码 + 响应头 + 正文 */
+    private fun getWithCookie(
+        port: Int,
+        cookie: String?,
+    ): Triple<Int, Map<String, String>, String> {
+        val conn = (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 5_000
             readTimeout = 10_000
+            cookie?.let { setRequestProperty("Cookie", it) }
         }
         return try {
             val code = conn.responseCode
             val headers = conn.headerFields.mapNotNull { (k, v) ->
                 k?.let { it to v.joinToString(",") }
             }.toMap()
-            // 消费响应体，避免连接被提前关闭影响后续请求
-            (if (code in 200..299) conn.inputStream else conn.errorStream)?.use { it.readBytes() }
-            code to headers
+            val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            Triple(code, headers, text)
         } finally {
             conn.disconnect()
         }

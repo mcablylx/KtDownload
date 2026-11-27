@@ -86,7 +86,63 @@ class DiagnosticBundleTest {
         assertTrue(manifest.contains("NO cloud-drive credentials"), "凭证文件仍应明确排除")
         // P1-07：声明必须与实现相符——日志确实会进包，要如实提示审阅
         assertTrue(manifest.contains("Application logs"), "manifest 必须说明日志会随包分发")
-        assertTrue(manifest.contains("review the logs before sharing"), "manifest 必须提示发送前审阅")
+        assertTrue(manifest.contains("Review the logs before sharing"), "manifest 必须提示发送前审阅")
+        assertTrue(manifest.contains("again at export time"), "manifest 要如实说明导出时再脱敏")
+    }
+
+    @Test
+    fun every_log_line_is_redacted_again_when_the_bundle_is_exported() = withTempDirs { logDir, dataDir ->
+        // 模拟 jcef / JVM 直写：绕开 AppLogger，落盘时没有任何脱敏
+        Files.writeString(
+            logDir.resolve("app-2026-11-15.log"),
+            listOf(
+                "[INFO] plain line",
+                "[INFO] {\"accessToken\":\"AT-SECRET-1\",\"fileName\":\"a.mp4\"}",
+                "[INFO] GET https://pan.example.com/api?token=URLSECRET&t=1",
+                "[INFO] password=hunter2&user=alice",
+            ).joinToString("\r\n"),
+        )
+        Files.writeString(logDir.resolve("jcef.log"), "[JCEF] captchaToken=CT-SECRET-2\n")
+        val crashDir = DiagnosticBundle.crashDir(dataDir)
+        Files.createDirectories(crashDir)
+        Files.writeString(crashDir.resolve("hs_err_pid1.log"), "[err] api_key=CRASH-SECRET\n")
+
+        val target = dataDir.resolve("diag.zip")
+        DiagnosticBundle.export(
+            target = target,
+            settings = AppSettings(),
+            logDir = logDir,
+            dataDir = dataDir,
+            now = now,
+            environment = "app=test\n",
+        )
+
+        ZipFile(target.toFile()).use { zip ->
+            fun entryText(name: String): String =
+                zip.getInputStream(zip.getEntry(name)).bufferedReader(Charsets.UTF_8).readText()
+
+            // 回归：曾因 Path 实现 Iterable 而被拆成 logs/Users/... 一堆空条目
+            val stray = zip.entries().asSequence().map { it.name }
+                .filter { it.startsWith("logs/") && it.count { c -> c == '/' } > 1 }.toList()
+            assertTrue(stray.isEmpty(), "日志条目不应把绝对路径拆成多段: $stray")
+
+            val app = entryText("logs/app-2026-11-15.log")
+            assertTrue(app.contains("plain line"), "普通日志行不应被破坏")
+            assertFalse(app.contains("AT-SECRET-1"))
+            assertFalse(app.contains("URLSECRET"))
+            assertFalse(app.contains("hunter2"))
+            assertTrue(app.contains("accessToken\":\"***"), app)
+            assertTrue(app.contains("?<redacted>"), app)
+
+            val jcef = entryText("logs/jcef.log")
+            assertTrue(jcef.isNotBlank(), "jcef entry should not be blank: [$jcef]")
+            assertFalse(jcef.contains("CT-SECRET-2"))
+            assertTrue(jcef.contains("captchaToken=***"), jcef)
+
+            val crash = entryText("crash/hs_err_pid1.log")
+            assertFalse(crash.contains("CRASH-SECRET"), "崩溃日志同样经过脱敏")
+            assertTrue(crash.contains("api_key=***"), crash)
+        }
     }
 
     @Test

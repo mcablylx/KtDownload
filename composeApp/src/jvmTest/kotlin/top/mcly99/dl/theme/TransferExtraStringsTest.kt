@@ -27,6 +27,7 @@ class TransferExtraStringsTest {
             assertTrue(table.openReceiveDirFailed.isNotBlank())
             assertTrue(table.copyIp.isNotBlank())
             assertTrue(table.webPortUnknown.isNotBlank())
+            assertTrue(table.trustedLanOnly.isNotBlank())
             assertTrue(table.portSwitchFailed(8080).isNotBlank())
             assertTrue(table.copiedIp("192.168.1.2").isNotBlank())
         }
@@ -55,5 +56,12 @@ class TransferExtraStringsTest {
         assertNotEquals(zh.cancelTransfer, en.cancelTransfer)
         assertNotEquals(zh.openReceiveDir, en.openReceiveDir)
         assertEquals("Cancel", en.cancelTransfer)
+    }
+
+    @Test
+    fun trusted_lan_notice_mentions_lan_in_both_languages() {
+        // P1-09：这条标注是安全边界说明，不能只有中文或只有英文
+        assertTrue(zh.trustedLanOnly.contains("局域网"), zh.trustedLanOnly)
+        assertTrue(en.trustedLanOnly.contains("LAN", ignoreCase = true), en.trustedLanOnly)
     }
 }

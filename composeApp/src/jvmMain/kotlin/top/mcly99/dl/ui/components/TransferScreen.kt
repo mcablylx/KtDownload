@@ -160,6 +160,13 @@ private fun DevicesTab(
                 Column {
                     Text(s.lanDevices, style = MaterialTheme.typography.titleSmall, color = FlowDownColors.Foreground)
                     Text(s.lanDevicesDesc, style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
+                    // P1-09：接收服务带 token 与大小上限，但仍只在可信局域网内使用；
+                    // 不把这条边界写在发现面板上，用户容易把地址当公网链接转发。
+                    Text(
+                        extra.trustedLanOnly,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FlowDownColors.Warning,
+                    )
                     if (!discoveryRunning || !fileServerRunning) {
                         Spacer(Modifier.height(4.dp))
                         Text(
@@ -256,7 +263,7 @@ private fun DeviceRow(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             // P1-24：这里原先复制 `http://ip:port`，可对方的 Web 上传服务强制要求
-            // `?token=`，而 token 是本机启动时随机生成的私有值，外人无从得知 ——
+            // `/session?token=`，而 token 是对方启动时随机生成的私有值，外人无从得知 ——
             // 复制出来的链接打开必定是 403。改成复制 IP（用户自己拼地址、或告诉同事 IP 都用得上）。
             IconButton(
                 onClick = {
@@ -317,6 +324,12 @@ private fun WebTab(
                 Column {
                     Text(s.webUploadService, style = MaterialTheme.typography.titleSmall, color = FlowDownColors.Foreground)
                     Text(s.webUploadDesc, style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)
+                    // P1-09：网页上传与 9877 接收共用同一 token，但都只对可信局域网成立。
+                    Text(
+                        extra.trustedLanOnly,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = FlowDownColors.Warning,
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(s.enableService, style = MaterialTheme.typography.bodySmall, color = FlowDownColors.MutedForeground)

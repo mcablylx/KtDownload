@@ -73,9 +73,10 @@ internal fun bestLocalIp(candidates: List<LocalIpCandidate>): Inet4Address? {
  * 基于 JDK 内置 HttpServer 实现的局域网文件上传服务，浏览器打开访问地址即可拖拽上传。
  *
  * 核心功能：
- * - HTTP服务：`GET /` 上传页，`POST /` 接收 multipart/form-data
- * - 访问控制：URL 必须携带 `?token=<accessToken>`，否则返回 403；令牌 128 bit，
- *   每次真正启动/换端口都轮转，失败尝试按来源 IP 限速（P2-18）
+ * - HTTP服务：`GET /session?token=...` 一次性引导，`GET /` 上传页，`POST /` 接收 multipart
+ * - 访问控制：引导令牌 128 bit、每次真正启动/换端口轮转、失败按 IP 限速；校验通过后
+ *   只签发 HttpOnly 会话 Cookie 并 302 到无 token 的地址，页面 JS 与上传请求都不再持有
+ *   令牌本体（P2-18 收口）
  * - 流式落盘：以固定缓冲区边读边写，不把请求体整体读入内存
  * - 限制保护：请求体上限、单文件上限、单请求文件数、并发上传数
  * - 资源管理：临时文件失败即清理、线程池随服务器停止而释放
@@ -83,7 +84,8 @@ internal fun bestLocalIp(candidates: List<LocalIpCandidate>): Inet4Address? {
  * @property saveDir 上传文件存储目录（默认用户下载目录）
  * @property strings UI字符串资源
  * @property onFileReceived 文件接收完成回调
- * @property accessToken 访问令牌，URL 形如 `http://ip:port/?token=xxx`
+ * @property accessToken 一次性引导令牌，URL 形如 `http://ip:port/session?token=xxx`；
+ *   登录后浏览器地址栏回到 `http://ip:port/`，后续只靠会话 Cookie
  * @property bindHost 监听地址，默认 `0.0.0.0`（全部网卡）；可指定单张网卡 IP 收窄暴露面
  *
  * @see TransferEngine 局域网传输引擎
@@ -137,7 +139,7 @@ class WebUploadServer(
         private set
 
     /**
-     * 访问令牌：浏览器必须带上 `?token=xxx`。
+     * 引导令牌：只在 `GET /session?token=xxx` 用一次，用来换一枚会话 Cookie。
      *
      * P2-18：原来是 `UUID` 前 16 hex = **64 bit**，且进程生命周期内不轮转；
      * 现在改为 128 bit `SecureRandom`，每次真正启动 / 换端口都生成新的一枚。
@@ -154,6 +156,16 @@ class WebUploadServer(
     /** 失败尝试按来源 IP 记录的滑动窗口状态 */
     private val tokenFailures = ConcurrentHashMap<String, TokenFailure>()
 
+    /**
+     * P2-18 收口：引导令牌换成的短会话。
+     *
+     * 会话 id 同样是 128 bit `SecureRandom`；只经 HttpOnly Cookie 传递，不入 URL、
+     * 不写进上传页 JS。令牌轮转 / 服务停止时整表清空，旧会话立即失效。
+     */
+    private val sessions = ConcurrentHashMap<String, Session>()
+
+    private class Session(@Volatile var expiresAtMs: Long)
+
     private class TokenFailure(
         @Volatile var count: Int,
         @Volatile var windowStartMs: Long,
@@ -167,6 +179,10 @@ class WebUploadServer(
 
     companion object {
         private const val TOKEN_BYTES = 16                       // 128 bit
+        /** 会话 Cookie 名；HttpOnly + SameSite=Lax，局域网 http 场景无法加 Secure */
+        internal const val SESSION_COOKIE = "KTD_SESSION"
+        /** 会话空闲有效期：12 小时，足够一次局域网传输会话，又不至于长期悬挂 */
+        internal const val SESSION_TTL_MS = 12 * 60 * 60 * 1000L
         /** 单个来源 IP 在一个窗口内允许的失败次数 */
         internal const val MAX_TOKEN_FAILURES = 5
         internal const val TOKEN_FAILURE_WINDOW_MS = 60_000L
@@ -201,8 +217,9 @@ class WebUploadServer(
     fun rotateAccessToken(): String {
         val fresh = randomToken()
         accessToken = fresh
-        // 旧令牌立刻失效，历史失败计数也一起作废，避免旧状态误伤新令牌的合法请求
+        // 旧令牌与旧会话立刻失效；历史失败计数也一起作废，避免旧状态误伤新令牌的合法请求
         tokenFailures.clear()
+        sessions.clear()
         onTokenRotated(fresh)
         return fresh
     }
@@ -279,7 +296,12 @@ class WebUploadServer(
             created.createContext("/") { exchange ->
                 try {
                     when (exchange.requestMethod) {
-                        "GET" -> serveUploadPage(exchange)
+                        // P2-18：令牌只在这条一次性引导路径出现，成功后 302 到无 token 的 /
+                        "GET" -> if (exchange.requestURI.path == "/session") {
+                            bootstrapSession(exchange)
+                        } else {
+                            serveUploadPage(exchange)
+                        }
                         "POST" -> handleUpload(exchange)
                         else -> respondJson(exchange, 405, "{\"success\":false,\"error\":\"method_not_allowed\"}")
                     }
@@ -334,6 +356,7 @@ class WebUploadServer(
         watchdog = null
         activeUploads.clear()
         tokenFailures.clear()
+        sessions.clear()
         AppLogger.info("WebUpload", "服务已停止")
     }
 
@@ -403,9 +426,9 @@ class WebUploadServer(
         return "127.0.0.1"
     }
 
-    /** 给界面展示用的完整上传地址（含令牌） */
+    /** 给界面展示用的一次性引导地址；浏览器登录后地址栏会回到无 token 的 `/` */
     fun accessUrl(hostPort: String = "${getLocalIp()}:$port"): String =
-        "http://$hostPort/?token=$accessToken"
+        "http://$hostPort/session?token=$accessToken"
 
     // ------------------------------------------------------------------ HTTP
 
@@ -475,19 +498,71 @@ class WebUploadServer(
         return false
     }
 
-    private fun serveUploadPage(exchange: HttpExchange) {
+    /**
+     * 一次性引导：query 里的令牌只在这里出现，换到 HttpOnly Cookie 后立刻 302 到 `/`。
+     *
+     * 这样令牌不会留在地址栏 / 历史 / 上传页 JS 中；后续浏览器与 XHR 都只带会话 Cookie。
+     * 局域网 http 无法加 `Secure`，用 `HttpOnly + SameSite=Lax + no-store + Referrer-Policy`
+     * 把泄露面收窄；真要公网使用应前置 HTTPS 并把 `bindHost` 收窄到单网卡。
+     */
+    private fun bootstrapSession(exchange: HttpExchange) {
         if (!checkToken(exchange)) return
+        val now = clock()
+        pruneSessions(now)
+        val id = randomToken()
+        sessions[id] = Session(now + SESSION_TTL_MS)
+        exchange.responseHeaders.add(
+            "Set-Cookie",
+            "$SESSION_COOKIE=$id; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}",
+        )
+        exchange.responseHeaders.add("Cache-Control", "no-store")
+        exchange.responseHeaders.add("Referrer-Policy", "no-referrer")
+        exchange.responseHeaders.add("Location", "/")
+        exchange.sendResponseHeaders(302, -1)
+        exchange.close()
+    }
+
+    /** 清掉过期会话，避免长期运行的表无限增长 */
+    private fun pruneSessions(now: Long) {
+        sessions.entries.removeAll { (_, session) -> session.expiresAtMs <= now }
+    }
+
+    /** 校验会话 Cookie；失败时已写出 403。会话 id 是 128 bit 随机值，不做 URL 回退。 */
+    private fun checkSession(exchange: HttpExchange): Boolean {
+        val cookie = exchange.requestHeaders.getFirst("Cookie").orEmpty()
+        val id = cookie.split(';')
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("$SESSION_COOKIE=") }
+            ?.substringAfter('=', "")
+            .orEmpty()
+        if (id.isBlank()) {
+            respondJson(exchange, 403, "{\"success\":false,\"error\":\"forbidden\"}")
+            return false
+        }
+        val now = clock()
+        val session = sessions[id]
+        if (session == null || session.expiresAtMs <= now) {
+            if (session != null) sessions.remove(id)
+            respondJson(exchange, 403, "{\"success\":false,\"error\":\"forbidden\"}")
+            return false
+        }
+        session.expiresAtMs = now + SESSION_TTL_MS
+        return true
+    }
+
+    private fun serveUploadPage(exchange: HttpExchange) {
+        if (!checkSession(exchange)) return
         val bytes = buildUploadPage().toByteArray(Charsets.UTF_8)
         exchange.responseHeaders.add("Content-Type", "text/html; charset=UTF-8")
         exchange.responseHeaders.add("Cache-Control", "no-store")
-        // 令牌在 URL query 里：禁止把它当 Referer 发给页面内可能加载的任何资源（P2-18）
+        // 防御纵深：令牌虽已从地址栏移除，仍禁止把当前地址当 Referer 外发（P2-18）
         exchange.responseHeaders.add("Referrer-Policy", "no-referrer")
         exchange.sendResponseHeaders(200, bytes.size.toLong())
         exchange.responseBody.use { it.write(bytes) }
     }
 
     private fun handleUpload(exchange: HttpExchange) {
-        if (!checkToken(exchange)) return
+        if (!checkSession(exchange)) return
 
         val contentType = exchange.requestHeaders.getFirst("Content-Type") ?: ""
         val boundary = if (contentType.contains("multipart/form-data")) extractBoundary(contentType) else null
@@ -917,7 +992,8 @@ h1 { text-align:center; font-size:24px; margin-bottom:4px; color:#34D399; }
 var dropZone = document.getElementById('dropZone');
 var fileInput = document.getElementById('fileInput');
 var fileList = document.getElementById('fileList');
-var uploadUrl = '/?token=' + encodeURIComponent('${accessToken}');
+// P2-18：登录后靠 HttpOnly 会话 Cookie，页面脚本里不再出现令牌本体
+var uploadUrl = '/';
 
 dropZone.addEventListener('click', function(){ fileInput.click(); });
 dropZone.addEventListener('dragover', function(e){ e.preventDefault(); dropZone.classList.add('drag-over'); });

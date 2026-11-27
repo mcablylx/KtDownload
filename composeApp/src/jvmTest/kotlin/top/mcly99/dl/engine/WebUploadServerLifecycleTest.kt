@@ -81,13 +81,16 @@ class WebUploadServerLifecycleTest {
         val server = newServer()
         val port = freePort()
         assertTrue(server.start(port))
+        val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertTrue(session.code == 302, "引导应成功，否则测不到活跃连接关闭")
         val socket = Socket("127.0.0.1", port)
         try {
             socket.soTimeout = 3_000
             val out = socket.getOutputStream()
             val head = buildString {
-                append("POST /?token=${server.accessToken} HTTP/1.1\r\n")
+                append("POST / HTTP/1.1\r\n")
                 append("Host: 127.0.0.1\r\n")
+                append("Cookie: ${session.cookie}\r\n")
                 append("Content-Type: multipart/form-data; boundary=BOUND\r\n")
                 // 声明 4096 字节但只发一小段：服务端会阻塞在 requestBody.read()
                 append("Content-Length: 4096\r\n\r\n")

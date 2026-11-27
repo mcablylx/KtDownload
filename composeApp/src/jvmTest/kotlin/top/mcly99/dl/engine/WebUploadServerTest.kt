@@ -25,7 +25,8 @@ import kotlin.test.assertTrue
  * - 边界情况：1 字节、0 字节、> 4096 字节（跨越旧实现丢字节的阈值）
  * - 多段：单请求多文件、非文件字段与文件混排（验证分隔符之后的段头不会被吞）
  * - 编码：中文文件名
- * - 安全：无 token 403、路径穿越仍落在保存目录内、Windows 保留名 400
+ * - 安全：无会话 Cookie 403、路径穿越仍落在保存目录内、Windows 保留名 400
+ *   （P2-18：令牌只用于一次性引导，上传请求本身只带 Cookie）
  * - 限制：文件数超过 `MAX_FILES_PER_REQUEST` 返回 413
  */
 class WebUploadServerTest {
@@ -141,11 +142,13 @@ class WebUploadServerTest {
     }
 
     @Test
-    fun upload_page_requires_token() {
-        val unauthorized = get("")
+    fun upload_page_requires_a_session() {
+        val unauthorized = get()
         assertEquals(403, unauthorized.first, unauthorized.second)
 
-        val authorized = get("?token=${server.accessToken}")
+        val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, session.code, "引导接口应 302 到无 token 地址")
+        val authorized = get(cookie = session.cookie)
         assertEquals(200, authorized.first, authorized.second)
         assertTrue(authorized.second.contains("<html"), "上传页应返回 HTML")
     }
@@ -201,7 +204,9 @@ class WebUploadServerTest {
             assertEquals(port, server.port, "端口号应当仍是旧的有效端口")
 
             // 旧端口仍能正常服务（不只是状态字段没变脏）
-            val (code, body) = get("?token=${server.accessToken}")
+            val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+            assertEquals(302, session.code)
+            val (code, body) = get(cookie = session.cookie)
             assertEquals(200, code, "旧端口应当仍可访问")
             assertTrue(body.contains("<!DOCTYPE html>"), "应当仍是上传页")
         } finally {
@@ -214,7 +219,9 @@ class WebUploadServerTest {
     fun starting_twice_on_the_same_port_is_a_no_op() {
         assertTrue(server.start(port), "同端口重复启动应当报成功")
         assertEquals(port, server.port)
-        val (code, _) = get("?token=${server.accessToken}")
+        val session = WebUploadTestSession.bootstrap(port, server.accessToken)
+        assertEquals(302, session.code)
+        val (code, _) = get(cookie = session.cookie)
         assertEquals(200, code)
     }
 
@@ -266,11 +273,14 @@ class WebUploadServerTest {
         val quick = WebUploadServer(saveDir = dir.absolutePath, idleTimeoutMs = 300)
         val quickPort = freePort()
         assertTrue(quick.start(quickPort), "服务启动失败，端口 $quickPort")
+        val session = WebUploadTestSession.bootstrap(quickPort, quick.accessToken)
+        assertEquals(302, session.code)
         try {
             java.net.Socket("127.0.0.1", quickPort).use { socket ->
                 socket.soTimeout = 5_000
-                val head = "POST /?token=${quick.accessToken} HTTP/1.1\r\n" +
+                val head = "POST / HTTP/1.1\r\n" +
                     "Host: 127.0.0.1:$quickPort\r\n" +
+                    "Cookie: ${session.cookie}\r\n" +
                     "Content-Type: multipart/form-data; boundary=XYZ\r\n" +
                     "Content-Length: 1000000\r\n\r\n" +
                     "--XYZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"stalled.bin\"\r\n\r\n"
@@ -366,12 +376,17 @@ class WebUploadServerTest {
         boundary: String = "----KtDownTestBoundary",
     ): Pair<Int, String> = withFreshConnectionRetry {
         val body = buildMultipart(parts, boundary)
-        val query = if (token == null) "" else "?token=$token"
-        val conn = (URL("http://127.0.0.1:$port/$query").openConnection() as HttpURLConnection).apply {
+        // 一次性引导换会话 Cookie；POST 本身不再带任何令牌
+        val session = WebUploadTestSession.bootstrap(port, token)
+        if (session.code != 302) {
+            return@withFreshConnectionRetry session.code to "{\"error\":\"bootstrap_failed\"}"
+        }
+        val conn = (URL("http://127.0.0.1:$port/").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true
             connectTimeout = 5_000
             readTimeout = 20_000
+            setRequestProperty("Cookie", session.cookie ?: "")
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
             setRequestProperty("Content-Length", body.size.toString())
         }
@@ -385,11 +400,15 @@ class WebUploadServerTest {
         }
     }
 
-    private fun get(query: String): Pair<Int, String> = withFreshConnectionRetry {
-        val conn = (URL("http://127.0.0.1:$port/$query").openConnection() as HttpURLConnection).apply {
+    private fun get(
+        path: String = "/",
+        cookie: String? = null,
+    ): Pair<Int, String> = withFreshConnectionRetry {
+        val conn = (URL("http://127.0.0.1:$port$path").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 5_000
             readTimeout = 20_000
+            cookie?.let { setRequestProperty("Cookie", it) }
         }
         try {
             val code = conn.responseCode

@@ -32,9 +32,13 @@ object SensitiveTextRedactor {
         RegexOption.IGNORE_CASE,
     )
 
-    /** form-urlencoded 形态：password=xxx（保留 &/? 分隔符，避免把参数粘连） */
+    /**
+     * form-urlencoded 形态：password=xxx（保留 &/? 分隔符，避免把参数粘连）。
+     * 允许空白前缀：日志行常以 `[INFO] password=xxx` 这种自由文本出现，
+     * 只认 `&` / `?` 会漏掉（P1-07 入包逐行脱敏时暴露）。
+     */
     private val FORM_SECRET = Regex(
-        """((?:^|[&?])(?:$SECRET_KEY)=)([^&]*)""",
+        """((?:^|[&?\s])(?:$SECRET_KEY)=)([^&]*)""",
         RegexOption.IGNORE_CASE,
     )
 
