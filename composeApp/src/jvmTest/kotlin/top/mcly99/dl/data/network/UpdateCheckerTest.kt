@@ -93,4 +93,25 @@ class UpdateCheckerTest {
         assertEquals("myowner", seenOwner)
         assertEquals("myrepo", seenRepo)
     }
+
+    @Test
+    fun asset_version_must_match_the_release_tag() = runTest {
+        val mismatch = UpdateChecker(
+            { _, _ -> release(
+                "v1.0.2",
+                assets = listOf(GitHubAsset("KtDownload-1.0.1.exe", "https://x/1.0.1.exe", 1L, null)),
+            ) },
+            platform = HostPlatform.WINDOWS,
+        )
+        assertNull(mismatch.check("1.0.0"), "tag 与安装包版本不符时不应返回 UpdateInfo")
+
+        val unrelated = UpdateChecker(
+            { _, _ -> release(
+                "v1.0.2",
+                assets = listOf(GitHubAsset("notes.exe", "https://x/notes.exe", 1L, null)),
+            ) },
+            platform = HostPlatform.WINDOWS,
+        )
+        assertNull(unrelated.check("1.0.0"), "Release 里混入的无关 exe 不能被选中")
+    }
 }

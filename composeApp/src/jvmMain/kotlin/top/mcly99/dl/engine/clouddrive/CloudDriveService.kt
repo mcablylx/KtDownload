@@ -1,6 +1,7 @@
 package top.mcly99.dl.engine.clouddrive
 
 import top.mcly99.dl.engine.sanitizeCredentialForHeaders
+import top.mcly99.dl.data.db.XunleiAccountEntity
 import top.mcly99.dl.data.network.BaiduApi
 import top.mcly99.dl.data.network.C139Api
 import top.mcly99.dl.data.network.C139Constants
@@ -602,7 +603,22 @@ class CloudDriveService(
                 deviceIdProvider = { tokens()?.deviceId?.takeIf { it.isNotBlank() } },
                 captchaProvider = { null },
                 refreshProvider = { refreshXunleiToken(xunleiApi, "") },
-            )
+            ).apply {
+                // 多账号下载（实验性 C1/C2）传给仓库的是目标账号的「凭证原文」（结构化 JSON /
+                // Cookie 串），不是裸 access_token。这里直接解析出该账号自己的三件套，
+                // 让 identityFor / 配额 / 转存都用它；解析不到时仓库层回退主账号，行为不变（P1-03）。
+                accountByTokenProvider = { raw ->
+                    XunleiDriveCredential.parse(raw)?.takeIf { it.isUsable }?.let { cred ->
+                        XunleiAccountEntity(
+                            accessToken = cred.accessToken,
+                            refreshToken = cred.refreshToken,
+                            deviceId = cred.deviceId,
+                            captchaToken = cred.captchaToken,
+                            userId = cred.userId,
+                        )
+                    }
+                }
+            }
         }
         // GitHub 不经由 ShareResolveRepository：createSession / listFiles / downloadLink
         // 三处都已分流到 GitHubBrowser，这里只作为防御性兜底。

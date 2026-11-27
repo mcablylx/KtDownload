@@ -89,6 +89,43 @@ suspend fun awaitUntilSuspend(
 }
 
 /**
+ * **负向观察窗口**：在 [windowMs] 内反复检查 [condition]，一旦成立立即 [fail]；
+ * 窗口走完始终不成立则正常返回。
+ *
+ * 用于「取消后不应再发第二次请求」「暂停后调度器不应补位」这类断言：
+ * 换成 `awaitUntil` 会立即返回而丢掉观察窗口，换成固定 `Thread.sleep` 又没有超时体系。
+ * 窗口统一走 [TestTimeouts.scaled]，可被 `-Dktdl.testScale` 放大（只放大等待，不放宽断言）。
+ */
+fun awaitStable(
+    windowMs: Long = TestTimeouts.scaled(800),
+    intervalMs: Long = 20,
+    describe: () -> String,
+    condition: () -> Boolean,
+) {
+    val deadline = System.currentTimeMillis() + windowMs
+    while (System.currentTimeMillis() < deadline) {
+        if (condition()) fail("观察窗口内出现了不该发生的状态：${describe()}")
+        Thread.sleep(intervalMs)
+    }
+    if (condition()) fail("观察窗口内出现了不该发生的状态：${describe()}")
+}
+
+/** [awaitStable] 的 suspend 版本：不占线程，可被协程取消打断 */
+suspend fun awaitStableSuspend(
+    windowMs: Long = TestTimeouts.scaled(900),
+    intervalMs: Long = 20,
+    describe: () -> String,
+    condition: () -> Boolean,
+) {
+    val deadline = System.currentTimeMillis() + windowMs
+    while (System.currentTimeMillis() < deadline) {
+        if (condition()) fail("观察窗口内出现了不该发生的状态：${describe()}")
+        delay(intervalMs)
+    }
+    if (condition()) fail("观察窗口内出现了不该发生的状态：${describe()}")
+}
+
+/**
  * 等 [StateFlow] 的当前值满足 [predicate]。
  *
  * 事件驱动的核心：`first {}` 挂起在收集上，状态一变就被唤醒，不做 sleep 轮询，

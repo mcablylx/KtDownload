@@ -65,7 +65,11 @@ class UpdateDownloader(
         cancelled = false
         val dir = AppConstants.APP_DATA_DIR.resolve("updates")
         Files.createDirectories(dir)
-        val tmp = dir.resolve("${asset.name}.part")
+        // P1-08：asset.name 直接做落盘文件名，先按 pickInstaller 的命名约定校验，
+        // 防止 Release 里混入 `../evil.exe` 之类的名字逃出 updates 目录被直接执行。
+        val safeName = asset.name.takeIf { INSTALLER_NAME.matches(it) }
+            ?: throw IllegalStateException("安装包文件名不符合命名约定: ${asset.name}")
+        val tmp = dir.resolve("$safeName.part")
 
         try {
             // 与网盘下载、GitHub 仓库浏览共用同一套镜像选择（AUTO 测速 / 用户固定前缀）。
@@ -75,9 +79,14 @@ class UpdateDownloader(
             val candidates = buildList {
                 // 规范化尾部斜杠：用户自定义前缀可能不带 '/'，直接拼会得到
                 // https://proxy.comhttps://github.com/...（P2-E7）
-                if (prefix.isNotBlank()) add(prefix.trimEnd('/') + "/" + asset.downloadUrl)
-                add(asset.downloadUrl)
+                if (prefix.isNotBlank()) {
+                    val mirrored = prefix.trimEnd('/') + "/" + asset.downloadUrl
+                    if (isSafeHttpsUrl(mirrored)) add(mirrored)
+                }
+                if (isSafeHttpsUrl(asset.downloadUrl)) add(asset.downloadUrl)
             }
+            // P1-08：不接受 http:// 明文下载，也不接受带 userinfo / 无主机的畸形 URL
+            if (candidates.isEmpty()) throw IllegalStateException("没有可信的 https 下载源")
             val client = clientProvider()
 
             // 只在「拿到成功响应前」切换下载源；一旦开始写流就固定在当前源，
@@ -164,7 +173,7 @@ class UpdateDownloader(
                 throw IllegalStateException("安装包校验失败：大小不符（期望 ${asset.size}，实际 ${Files.size(tmp)}）")
             }
 
-            val final = dir.resolve(asset.name)
+            val final = dir.resolve(safeName)
             Files.move(tmp, final, StandardCopyOption.REPLACE_EXISTING)
             AppLogger.info("Update", "安装包下载完成: ${final.fileName} (${Files.size(final)} bytes)")
             final
@@ -198,6 +207,26 @@ class UpdateDownloader(
             val head = ByteArray(expected.length)
             val read = peek.read(head, 0, expected.length)
             read == expected.length && String(head, Charsets.US_ASCII) == expected
+        }.getOrDefault(false)
+    }
+
+    /** 只接受 https 且无 userinfo / 有主机的 URL（P1-08）。 */
+    private fun isSafeHttpsUrl(url: String): Boolean = runCatching {
+        val uri = java.net.URI(url)
+        uri.scheme?.equals("https", ignoreCase = true) == true &&
+            !uri.host.isNullOrBlank() && uri.userInfo == null
+    }.getOrDefault(false)
+
+    /**
+     * 安装前二次校验：重新读盘计算 digest，覆盖「下载后校验 → 打开安装器」之间
+     * 文件被替换的窗口（TOCTOU）。无 digest 一律不通过（P1-08）。
+     */
+    fun verify(file: Path, asset: GitHubAsset, expectedSha256: String?): Boolean {
+        if (expectedSha256.isNullOrBlank()) return false
+        if (!Files.isRegularFile(file)) return false
+        if (asset.size > 0 && runCatching { Files.size(file) }.getOrDefault(-1L) != asset.size) return false
+        return runCatching {
+            sha256(file.toFile()).equals(expectedSha256.trim(), ignoreCase = true)
         }.getOrDefault(false)
     }
 

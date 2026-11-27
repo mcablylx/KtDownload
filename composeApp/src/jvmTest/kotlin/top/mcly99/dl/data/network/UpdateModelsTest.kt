@@ -56,8 +56,27 @@ class UpdateModelsTest {
 
     @Test
     fun ignores_unrelated_files_with_same_extension() {
-        // 按约定匹配扩展名即可；发布者应确保 Release 里只放正确的安装包
+        // P1-08：只认 KtDownload-<版本>.<ext>；Release 里混入的 notes.exe 不能被静默选中并执行
         val assets = listOf(asset("notes.exe"), asset("KtDownload-1.0.1.exe"))
-        assertEquals("notes.exe", pickInstaller(assets, HostPlatform.WINDOWS)?.name)
+        assertEquals("KtDownload-1.0.1.exe", pickInstaller(assets, HostPlatform.WINDOWS)?.name)
+    }
+
+    @Test
+    fun versioned_selection_rejects_mismatched_or_unversioned_assets() {
+        val assets = listOf(
+            asset("KtDownload-9.9.9.exe"),
+            asset("notes.exe"),
+            asset("KtDownload-1.0.1.exe"),
+        )
+        assertEquals("KtDownload-1.0.1.exe", pickInstaller(assets, HostPlatform.WINDOWS, "v1.0.1")?.name)
+        assertNull(pickInstaller(listOf(asset("KtDownload-9.9.9.exe")), HostPlatform.WINDOWS, "v1.0.1"))
+        assertNull(pickInstaller(listOf(asset("notes.exe")), HostPlatform.WINDOWS, "v1.0.1"))
+    }
+
+    @Test
+    fun v_prefix_is_normalized_on_both_sides() {
+        val assets = listOf(asset("KtDownload-v1.0.1.dmg"))
+        assertEquals("KtDownload-v1.0.1.dmg", pickInstaller(assets, HostPlatform.MACOS, "1.0.1")?.name)
+        assertEquals("KtDownload-v1.0.1.dmg", pickInstaller(assets, HostPlatform.MACOS, "v1.0.1")?.name)
     }
 }

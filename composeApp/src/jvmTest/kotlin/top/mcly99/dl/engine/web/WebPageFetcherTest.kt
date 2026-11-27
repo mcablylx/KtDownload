@@ -4,9 +4,11 @@ import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import top.mcly99.dl.testutil.TestTimeouts
+import top.mcly99.dl.testutil.awaitStableSuspend
+import top.mcly99.dl.testutil.awaitUntilSuspend
 import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.nio.charset.Charset
@@ -280,12 +282,18 @@ class WebPageFetcherTest {
         val job = launch(Dispatchers.Default) {
             runCatching { WebPageFetcher().fetch("$baseUrl/always-500") }
         }
-        // 等第一次请求真的发出去（重试等待 700ms 之后才会发第二次）
-        while (downHits.get() == 0) delay(10)
+        // 等第一次请求真的发出去（重试等待 700ms 之后才会发第二次）。
+        // 原来是无超时的 while(delay(10))：首请求若永远没发出，测试会挂到全局超时。
+        awaitUntilSuspend(TestTimeouts.SHORT, intervalMs = 10, describe = {
+            "第一次 /always-500 请求未发出，downHits=${downHits.get()}"
+        }) { downHits.get() >= 1 }
         job.cancelAndJoin()
 
-        // 再等一个完整重试间隔：取消若没打断 delay，第二次请求此时已经发出去了
-        delay(900)
+        // 负向观察窗口：覆盖一个完整重试间隔（700ms + 裕量）。
+        // 若取消没打断 delay，第二次请求会在这个窗口内出现并立即失败。
+        awaitStableSuspend(TestTimeouts.scaled(900), intervalMs = 20, describe = {
+            "取消后仍发出了第二次请求，downHits=${downHits.get()}"
+        }) { downHits.get() >= 2 }
         assertEquals(1, downHits.get())
     }
 

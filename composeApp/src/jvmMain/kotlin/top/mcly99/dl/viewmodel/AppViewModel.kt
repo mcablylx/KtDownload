@@ -10,10 +10,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import top.mcly99.dl.data.SettingsRepository
 import top.mcly99.dl.data.network.GitHubApi
@@ -144,7 +146,7 @@ class AppViewModel {
     var updateStatus by mutableStateOf<UpdateStatus?>(null)
         private set
 
-    enum class UpdateStatus { CHECKING, UP_TO_DATE, DOWNLOAD_FAILED, OPEN_FAILED }
+    enum class UpdateStatus { CHECKING, UP_TO_DATE, DOWNLOAD_FAILED, OPEN_FAILED, UNTRUSTED_RELEASE }
 
     private var updateStatusJob: Job? = null
 
@@ -449,8 +451,11 @@ class AppViewModel {
         }
     }
 
+    /** 设置防抖写盘协程：shutdown 要先 cancelAndJoin 再同步落盘（P1-06） */
+    private var settingsPersistenceJob: Job? = null
+
     private fun observeSettingsPersistence() {
-        scope.launch {
+        settingsPersistenceJob = scope.launch {
             // collectLatest + delay 代替 debounce，避免 FlowPreview 注解污染
             snapshotFlow { settings }.collectLatest { latest ->
                 delay(AppConstants.SETTINGS_SAVE_DEBOUNCE_MS)
@@ -704,6 +709,15 @@ class AppViewModel {
     fun downloadAndInstall() {
         val info = updateInfo ?: return
         if (updateDownloading) return
+        // P1-08：digest 是唯一的独立信任锚。旧 Release 没有 digest，
+        // 只回退 size 校验不足以挡住「同 size 的伪造包」被直接执行，一律不自动安装；
+        // 仍能发现新版本 / 看更新说明，由弹窗「前往 Release 页面」手动下载兜底。
+        val digest = info.asset.sha256OrNull()
+        if (digest.isNullOrBlank()) {
+            AppLogger.warn("Update", "Release ${info.version} 未提供 sha-256 digest，拒绝自动安装")
+            showUpdateStatus(UpdateStatus.UNTRUSTED_RELEASE)
+            return
+        }
         updateDownloading = true
         updateProgress = 0f
         scope.launch {
@@ -711,9 +725,15 @@ class AppViewModel {
                 val file = updateDownloader.download(
                     asset = info.asset,
                     onProgress = { p -> updateProgress = p.fraction },
-                    // GitHub Release 的 digest（sha256:xxx）；无 digest 的旧 Release 回退 size 校验
-                    expectedSha256 = info.asset.sha256OrNull(),
+                    expectedSha256 = digest,
                 )
+                // 安装前重新读盘校验：覆盖 Files.move 之后到 ProcessBuilder.start 之前的 TOCTOU
+                if (!updateDownloader.verify(file, info.asset, digest)) {
+                    AppLogger.warn("Update", "安装前二次校验失败，拒绝启动安装器: ${file.fileName}")
+                    updateDownloading = false
+                    showUpdateStatus(UpdateStatus.DOWNLOAD_FAILED)
+                    return@launch
+                }
                 AppLogger.info("Update", "下载完成，准备打开: ${file.fileName}")
                 updateInfo = null
                 updateDownloading = false
@@ -763,6 +783,13 @@ class AppViewModel {
     }
 
     fun shutdown() {
+        // 先取消并等待防抖写盘协程：cancel 无法中断已进入 Dispatchers.IO 的阻塞 save，
+        // 只有 join 才能保证下面这次同步写是「最后一次」，不会与旧写交错（P1-06）。
+        runCatching {
+            runBlocking { settingsPersistenceJob?.cancelAndJoin() }
+        }.onFailure { e ->
+            AppLogger.warn("AppViewModel", "等待设置防抖写盘结束失败: ${e.message}", e)
+        }
         // 界面销毁时把最后一次设置同步落盘，避免 debounce 中的修改丢失
         updateDownloader.cancel()
         runCatching { SettingsRepository.save(settings) }

@@ -50,7 +50,8 @@ class UpdateChecker(
         if (release.prerelease || release.draft) return null
         if (!Version.isNewer(release.tagName, currentVersion)) return null
 
-        val asset = pickInstaller(release.assets, platform) ?: return null
+        // P1-08：按 tag 精确匹配安装包名，避免 Release 里混入的其它 exe/dmg 被静默安装
+        val asset = pickInstaller(release.assets, platform, release.tagName) ?: return null
         return UpdateInfo(
             version = release.tagName,
             notes = release.body,

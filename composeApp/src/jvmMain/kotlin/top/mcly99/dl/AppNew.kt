@@ -97,6 +97,7 @@ fun AppNew(
         AppViewModel.UpdateStatus.UP_TO_DATE -> updateText.upToDate
         AppViewModel.UpdateStatus.DOWNLOAD_FAILED -> updateText.downloadFailed
         AppViewModel.UpdateStatus.OPEN_FAILED -> updateText.openFailed
+        AppViewModel.UpdateStatus.UNTRUSTED_RELEASE -> updateText.untrustedRelease
         null -> null
     }
 

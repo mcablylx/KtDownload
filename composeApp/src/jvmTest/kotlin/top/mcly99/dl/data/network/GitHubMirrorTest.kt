@@ -5,6 +5,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -174,5 +175,34 @@ class GitHubMirrorTest {
         service.selectGithubMirror(GitHubMirror.PRESETS[0])
         assertEquals(GitHubMirror.PRESETS[0], service.githubMirrorValue())
         assertEquals(GitHubMirror.PRESETS[0], GitHubMirror.activePrefix())
+    }
+
+    @Test
+    fun http_and_malformed_prefixes_are_never_persisted_or_used() {
+        GitHubMirror.setPrefix("http://evil.example/")
+        assertEquals("", GitHubMirror.fixedPrefix(), "非 https 前缀必须被拒绝")
+        assertEquals("", GitHubMirror.activePrefix())
+
+        GitHubMirror.setPrefix("https://user:pwd@evil.example/")
+        assertEquals("", GitHubMirror.fixedPrefix(), "带 userinfo 的前缀必须被拒绝")
+
+        // 用户显式配置的自定义 https 镜像仍被允许，但规范化后保存
+        GitHubMirror.setPrefix("https://mirror.example.com")
+        assertEquals("https://mirror.example.com/", GitHubMirror.fixedPrefix())
+        assertEquals("https://mirror.example.com/", GitHubMirror.activePrefix())
+    }
+
+    @Test
+    fun tampered_fastest_prefix_falls_back_to_direct() {
+        // 明文 yunx-misc.properties 被改成任意 https 主机：自动测速产物必须来自 PRESETS
+        GitHubMirror.prefs.put("github_mirror_fastest", "https://evil.example/")
+        GitHubMirror.resetForTest()
+        assertNull(GitHubMirror.fastestPrefix())
+        assertEquals("", GitHubMirror.activePrefix())
+    }
+
+    @Test
+    fun all_presets_are_https() {
+        assertTrue(GitHubMirror.PRESETS.all { it.startsWith("https://") })
     }
 }

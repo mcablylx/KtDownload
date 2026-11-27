@@ -36,7 +36,8 @@ class XunleiResolveRepository(
      * 设备指纹与 captcha_token —— 拿主账号的设备号配另一个账号的 token，迅雷侧会直接拒）。
      *
      * 没有注入 / 查不到时退回主账号那一套（老调用点与游客链路的行为完全不变）。
-     * 用可变属性而不是构造参数：桌面端由 ResolveViewModel 在构造时接线，避免改动 MainScreen 的装配。
+     * 用可变属性而不是构造参数：桌面端由 CloudDriveService.createRepository 在构造时接线，
+     * 避免改动 repository 的构造签名与「中文口令解析」用的免登录临时仓库。
      */
     var accountByTokenProvider: (suspend (String) -> XunleiAccountEntity?)? = null
 
@@ -59,7 +60,9 @@ class XunleiResolveRepository(
     private suspend fun access(): String {
         ensureFreshToken()   // token 过期则先自动刷新
         val t = token()
-        api.cacheUserId(t)
+        // 共享 XunleiApi 的 currentUserId 可能已被多账号链路的 B 账号写过；回到主账号必须强切回来，
+        // 默认「空才写」切不回，会让 captcha/init 继续带 B 的 user_id（P1-03）。
+        api.cacheUserId(t, force = true)
         return t
     }
 
@@ -102,7 +105,9 @@ class XunleiResolveRepository(
         if (credential.isBlank()) return Identity(access(), deviceIdOrGuest(), captcha())
         val account = accountByTokenProvider?.invoke(credential)
             ?: return Identity(access(), deviceId(), captcha())
-        api.cacheUserId(account.accessToken)
+        // 与「我的网盘」同一口径：多账号切换时强制覆盖 user_id，
+        // 否则拿 A 的 user_id 给 B 换 captcha 会得到降级 token，写操作被拒。
+        api.cacheUserId(account.accessToken, force = true)
         // 与「我的网盘」同一条口径：设备号缺失时用本地指纹兜底，并丢弃不匹配的 captcha
         // （空 device 会被判 device_id is empty；device 与 captcha 不同源则是 device not match）
         val id = XunleiDriveCredential(
@@ -177,15 +182,17 @@ class XunleiResolveRepository(
         cookie: String,
         skipSpaceCheck: Boolean
     ): Result<String> = runCatching {
+        // 先解析本次请求的目标账号身份：配额与转存复用同一个 id，既避免重复走 access()/刷新，
+        // 也保证「转存占用目标账号空间」时查的是目标账号的配额（P1-03）。
+        val id = identityFor(cookie)
         // 转存前置空间校验：空间不足直接抛出，不再走后面的转存（避免被误报「转存超时」）；
         // 批量入口已做过整批预算校验时跳过（避免同一批多次查配额）
         if (!skipSpaceCheck) {
             TransferSpaceGuard.ensureEnoughSpace(file.fsize.takeIf { it > 0 }, "迅雷") {
-                api.getQuota(access(), deviceId(), captcha())
+                api.getQuota(id.token, id.deviceId, id.captcha)
             }
         }
         // 官方同步转存：restore 返回 trace_file_ids 映射，直接得到转存后的新文件 id（无需轮询）
-        val id = identityFor(cookie)
         val newId = api.restore(
             shareId = session.shareId,
             passCodeToken = session.stoken,
@@ -207,7 +214,9 @@ class XunleiResolveRepository(
     /** 批量转存 / 批量下载前的整批空间预算校验：只查一次配额，不足时抛出（迅雷转存占用目标账号空间） */
     override suspend fun ensureBatchSpace(sizes: List<Long>, credential: String): Boolean =
         TransferSpaceGuard.ensureEnoughSpaceForBatch(sizes, "迅雷") {
-            api.getQuota(access(), deviceId(), captcha())
+            // 整批预算同样按目标账号取配额；此前 credential 参数被忽略、恒查主账号（P1-03）。
+            val id = identityFor(credential)
+            api.getQuota(id.token, id.deviceId, id.captcha)
         }
 
     /** 迅雷取直链：转存 → 取详情直链 → 删除临时转存文件（直链自带签名，删除不影响下载） */
@@ -217,7 +226,8 @@ class XunleiResolveRepository(
         cookie: String,
         skipSpaceCheck: Boolean
     ): Result<DownloadLink> = runCatching {
-        // [cookie] 在这里是 access_token：多账号下载（实验性 C1/C2）会传入非主账号的 token，
+        // [cookie] 实际是「账号凭证原文」（结构化 JSON / Cookie 串，见 XunleiDriveCredential.parse），
+        // 不是裸 access_token：多账号下载（实验性 C1/C2）会传入非主账号的那一份凭证，
         // 整条链路（建临时目录 → 转存 → 取直链 → 删临时文件）都用那一个账号的身份，
         // 见 [identityFor]；为空时维持原来的主账号语义。
         val id = identityFor(cookie)

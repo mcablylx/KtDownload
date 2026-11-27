@@ -6,6 +6,7 @@ import top.mcly99.dl.model.NetworkDevice
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -74,6 +75,23 @@ class TransferEngine(
 
     /** 正在进行的发送任务：taskId -> Socket，用于取消时真正断开阻塞中的 IO */
     private val activeSockets = ConcurrentHashMap<String, Socket>()
+
+    /**
+     * 局域网接收的配对 token（P1-09）。
+     *
+     * 空串 = 不启用认证（保持旧协议，供未接线的场景与旧版本互操作）；
+     * 生产由 [top.mcly99.dl.viewmodel.TransferViewModel] 注入 WebUploadServer 的同源 token，
+     * 于是 9877 接收与 8080 网页上传由同一枚凭据保护，发送端 sendFiles 自动带 AUTH| 首行，
+     * 用户无需手输配对码。注入后旧版发送端（无 AUTH）会被拒绝 —— 这是默认严格的安全取舍。
+     */
+    @Volatile
+    var accessToken: String = ""
+
+    /** 接收并发上限，避免任意主机用大量连接打满线程/磁盘 */
+    private val transferSemaphore = Semaphore(AppConstants.MAX_CONCURRENT_TRANSFERS)
+
+    /** 已 accept 的连接：stop() 时显式关闭，不再只靠 soTimeout 兜底 */
+    private val acceptedSockets: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
 
     private var localDeviceId: String = java.util.UUID.randomUUID().toString()
     private var localDeviceName: String = "Device-${localDeviceId.take(6)}"
@@ -161,6 +179,9 @@ class TransferEngine(
         discoverySocket = null
         closeQuietly(serverSocket, "TransferEngine")
         serverSocket = null
+        // P1-09 / P2-03：已 accept 的连接此前一律不关，只靠 soTimeout 兜底；现在显式关闭
+        acceptedSockets.forEach { closeQuietly(it, "TransferEngine") }
+        acceptedSockets.clear()
     }
     
     /**
@@ -358,7 +379,20 @@ class TransferEngine(
                     } catch (e: java.io.IOException) {
                         if (!currentCoroutineContext().isActive || ss.isClosed) break else throw e
                     }
-                    launch { handleIncomingFile(clientSocket) }
+                    if (!transferSemaphore.tryAcquire()) {
+                        AppLogger.warn("TransferEngine", "接收并发已达上限，拒绝新连接")
+                        closeQuietly(clientSocket, "TransferEngine")
+                        continue
+                    }
+                    acceptedSockets.add(clientSocket)
+                    launch {
+                        try {
+                            handleIncomingFile(clientSocket)
+                        } finally {
+                            acceptedSockets.remove(clientSocket)
+                            transferSemaphore.release()
+                        }
+                    }
                 }
             } finally {
                 closeQuietly(ss, "TransferEngine")
@@ -378,18 +412,34 @@ class TransferEngine(
     private suspend fun handleIncomingFile(socket: Socket) {
         val remoteIp = runCatching { socket.inetAddress?.hostAddress.orEmpty() }.getOrDefault("")
         try {
-            socket.soTimeout = AppConstants.SOCKET_TIMEOUT_MS
             socket.sendBufferSize = AppConstants.SOCKET_BUFFER_SIZE
             socket.receiveBufferSize = AppConstants.SOCKET_BUFFER_SIZE
 
             // 使用单一 BufferedInputStream 读取元数据和文件内容，避免 BufferedReader
             // 预读导致文件数据丢失
             val bufferedInput = BufferedInputStream(socket.getInputStream(), AppConstants.TRANSFER_BUFFER_SIZE)
+
+            // P1-09：启用认证时，连接首行必须是 AUTH|<token>。校验放在任何 mkdirs / 写盘
+            // 之前，且认证阶段单独设短超时，防止未认证连接靠 30s soTimeout 长期挂住。
+            val requiredToken = accessToken
+            if (requiredToken.isNotBlank()) {
+                socket.soTimeout = AppConstants.TRANSFER_AUTH_TIMEOUT_MS
+                val authLine = readHeaderLine(bufferedInput)
+                if (authLine == null || authLine != "AUTH|$requiredToken") {
+                    AppLogger.warn("TransferEngine", "拒绝接收：配对校验未通过（来源 $remoteIp）")
+                    return
+                }
+            }
+            socket.soTimeout = AppConstants.SOCKET_TIMEOUT_MS
+
             val dir = receiveDir.apply { mkdirs() }
             val buffer = ByteArray(AppConstants.TRANSFER_BUFFER_SIZE)
             // 同一连接（同一批发送）内顶层文件夹只解析一次，否则第二个文件会因
             // “同名文件夹已存在”被另存为 xxx(1)
             val folderNames = HashMap<String, String>()
+            // 一条连接内的累计字节与文件数：防止「大量小文件」绕开单文件上限
+            var connectionBytes = 0L
+            var fileCount = 0
 
             while (currentCoroutineContext().isActive) {
                 val fileInfo = readHeaderLine(bufferedInput) ?: break
@@ -397,14 +447,24 @@ class TransferEngine(
                 if (!fileInfo.startsWith("FILE|")) {
                     return
                 }
+                if (++fileCount > AppConstants.MAX_TRANSFER_FILES_PER_CONNECTION) {
+                    AppLogger.warn("TransferEngine", "拒绝接收：单连接文件数超过上限")
+                    return
+                }
 
                 val parts = fileInfo.split("|")
                 val rawName = parts.getOrNull(1) ?: ""
                 val fileSize = parts.getOrNull(2)?.toLongOrNull() ?: -1L
-                if (fileSize < 0) {
-                    AppLogger.warn("TransferEngine", "拒绝接收：文件大小无效")
+                if (fileSize < 0 || fileSize > AppConstants.MAX_TRANSFER_FILE_BYTES ||
+                    connectionBytes + fileSize > AppConstants.MAX_TRANSFER_REQUEST_BYTES
+                ) {
+                    AppLogger.warn(
+                        "TransferEngine",
+                        "拒绝接收：文件大小无效或超出上限（声明 $fileSize，累计 $connectionBytes）",
+                    )
                     return
                 }
+                connectionBytes += fileSize
 
                 // 安全：逐段校验相对路径，防止 ../ 目录穿越、保留设备名与非法字符
                 val segments = sanitizeRelativePath(rawName)
@@ -414,8 +474,8 @@ class TransferEngine(
                 }
 
                 val outputFile = resolveReceiveTarget(dir, segments, folderNames)
-                // 二次校验：规范化后的最终路径必须仍在接收目录内
-                if (!outputFile.canonicalPath.startsWith(dir.canonicalPath + File.separator)) {
+                // P1-09：以接收目录真实路径为根做 confined 校验，并拒绝中间路径的符号链接
+                if (!isWithinReceiveRoot(dir, outputFile)) {
                     AppLogger.warn("TransferEngine", "拒绝接收：目标路径越出接收目录")
                     return
                 }
@@ -432,6 +492,25 @@ class TransferEngine(
         } finally {
             closeQuietly(socket, "TransferEngine")
         }
+    }
+
+    /**
+     * P1-09：以接收目录的**真实路径**为根做 confined 校验，并拒绝中间路径上的符号链接。
+     * 旧的 `canonicalPath.startsWith` 只做字符串前缀比较，接收目录里预置一个指向外部的
+     * 软链目录即可绕过；这里跟随 `toRealPath()` 后逐段检查。
+     */
+    private fun isWithinReceiveRoot(root: File, target: File): Boolean {
+        val rootAbs = root.toPath().toAbsolutePath().normalize()
+        val rootReal = runCatching { rootAbs.toRealPath() }.getOrDefault(rootAbs)
+        val parentAbs = target.parentFile?.toPath()?.toAbsolutePath()?.normalize() ?: return false
+        val parentReal = runCatching { parentAbs.toRealPath() }.getOrNull() ?: return false
+        if (!parentReal.startsWith(rootReal)) return false
+        var cursor: java.nio.file.Path? = parentAbs
+        while (cursor != null && cursor.startsWith(rootAbs) && cursor != rootAbs) {
+            if (Files.isSymbolicLink(cursor)) return false
+            cursor = cursor.parent
+        }
+        return true
     }
 
     /** 读取一行元数据（UTF-8）；EOF 或超长时返回 null */
@@ -621,6 +700,11 @@ class TransferEngine(
 
             val outputStream = s.getOutputStream()
             val writer = BufferedWriter(OutputStreamWriter(outputStream, Charsets.UTF_8))
+            // P1-09：与接收端同源的配对 token；为空时保持旧协议（兼容未启用认证的接收端）
+            if (accessToken.isNotBlank()) {
+                writer.write("AUTH|${accessToken}\n")
+                writer.flush()
+            }
 
             var totalBytes = 0L
             var lastSpeedUpdate = System.currentTimeMillis()

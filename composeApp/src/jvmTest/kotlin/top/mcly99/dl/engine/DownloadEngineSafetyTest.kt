@@ -7,6 +7,7 @@ import top.mcly99.dl.model.DownloadStatus
 import top.mcly99.dl.model.DownloadTask
 import top.mcly99.dl.testutil.TestTimeouts
 import top.mcly99.dl.testutil.awaitElement
+import top.mcly99.dl.testutil.awaitStable
 import top.mcly99.dl.testutil.awaitUntil
 import top.mcly99.dl.testutil.awaitValue
 import top.mcly99.dl.testutil.isTerminal
@@ -112,9 +113,14 @@ class DownloadEngineSafetyTest {
         val paused = engine.pauseAllDownloads()
         assertEquals(3, paused, "全部暂停应覆盖 1 个进行中 + 2 个排队")
 
-        // 给调度器足够时间：如果 pauseAll 只停进行中的任务，这里会看到某个 QUEUED 被
-        // 立刻拉起来变成 DOWNLOADING（旧实现就是这个表现）
-        Thread.sleep(800)
+        // 负向观察窗口：给调度器一轮机会。如果 pauseAll 只停进行中的任务，
+        // 某个 QUEUED 会被补位成 DOWNLOADING（旧实现就是这个表现），窗口内立即失败。
+        // 只看排队任务（ids[1..2]）：ids[0] 可能还在异步收尾，不算补位。
+        awaitStable(TestTimeouts.scaled(800), describe = {
+            "全部暂停后排队任务不应被补位启动: ${engine.taskState.value.map { "${it.id}:${it.status}" }}"
+        }) {
+            engine.taskState.value.any { it.id != ids[0] && it.status == DownloadStatus.DOWNLOADING }
+        }
         val statuses = engine.taskState.value.associate { it.id to it.status }
         ids.forEach { id ->
             assertEquals(DownloadStatus.PAUSED, statuses[id], "全部暂停之后不应还有任务在下载")

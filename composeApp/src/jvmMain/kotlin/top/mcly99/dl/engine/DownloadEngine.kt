@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -235,18 +236,24 @@ class DownloadEngine(
     /** 探测逻辑抛异常时按直连处理，不能让一个分片因为代理配置问题整条任务失败 */
     private fun currentProxy(): java.net.Proxy? = runCatching { proxyProvider() }.getOrNull()
 
-    /** 任务持久化的节流协程 */
+    /** 任务持久化的节流协程（@Volatile：addTask / removeTask / shutdown 可能来自不同线程） */
+    @Volatile
     private var persistJob: Job? = null
+
+    /** 串行化「cancel + 赋值」，避免 check-then-act 留下无主 Job（P2-05） */
+    private val persistLock = Any()
 
     /**
      * 请求持久化任务列表（2 秒节流，避免频繁写盘）
      */
     private fun requestPersist() {
         if (!taskPersistenceEnabled) return
-        persistJob?.cancel()
-        persistJob = scope.launch {
-            delay(AppConstants.TASK_PERSIST_DEBOUNCE_MS)
-            persistNow()
+        synchronized(persistLock) {
+            persistJob?.cancel()
+            persistJob = scope.launch {
+                delay(AppConstants.TASK_PERSIST_DEBOUNCE_MS)
+                persistNow()
+            }
         }
     }
 
@@ -1953,9 +1960,13 @@ class DownloadEngine(
             withTimeoutOrNull(SHUTDOWN_CLEANUP_TIMEOUT_MS) {
                 pendingCleanups.toList().joinAll()
             }
+            // 节流写盘协程可能已进入不可中断的阻塞 IO：先 cancel 并 join，
+            // 再同步落盘，避免两次写盘交错（AtomicPropsFile 兜底文件不损坏，join 保证顺序）。
+            withTimeoutOrNull(SHUTDOWN_CLEANUP_TIMEOUT_MS) {
+                persistJob?.cancelAndJoin()
+            }
         }
-        // 退出前把任务写盘（节流协程即将被取消，这里同步落盘）
-        persistJob?.cancel()
+        // 退出前把任务写盘（节流协程已 join，这里同步落盘是最后一次）
         synchronized(stateLock) {
             taskMap.entries.forEach { (id, task) ->
                 if (task.status == DownloadStatus.DOWNLOADING || task.status == DownloadStatus.MERGING) {

@@ -4,7 +4,9 @@ import top.mcly99.dl.model.AppSettings
 import top.mcly99.dl.model.ProxyMode
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.AtomicPropsFile
 import java.io.File
+import java.nio.file.Path
 import java.util.Properties
 
 /**
@@ -60,13 +62,14 @@ object SettingsRepository {
     /**
      * 读取设置；文件不存在或损坏时返回默认值。
      */
-    fun load(defaults: AppSettings = AppSettings()): AppSettings {
-        val file = configPath.toFile()
+    fun load(defaults: AppSettings = AppSettings()): AppSettings = readSettingsFrom(configPath, defaults)
+
+    /** 测试注入点：从指定路径读取（不碰 `~/.mclydownload`）；与写共用同一把锁。 */
+    internal fun readSettingsFrom(target: Path, defaults: AppSettings): AppSettings {
+        val file = target.toFile()
         if (!file.exists()) return defaults
         return try {
-            val props = Properties()
-            file.inputStream().use { props.load(it) }
-            fromProperties(props, defaults)
+            fromProperties(AtomicPropsFile.read(target), defaults)
         } catch (e: Exception) {
             // 配置损坏：备份原文件后重建，避免用户每次启动都失败且丢失现场
             AppLogger.warn("SettingsRepository", "读取配置失败，已备份并回退默认值: ${e.message}", e)
@@ -81,22 +84,19 @@ object SettingsRepository {
 
     /**
      * 保存设置（原子写入，避免崩溃时留下半截文件）。
+     * 不向调用方抛异常：shutdown 路径依赖这一点。
      */
     fun save(settings: AppSettings) {
         try {
-            configPath.parent.toFile().mkdirs()
-            val props = toProperties(settings)
-            val tmp = File(configPath.parent.toFile(), "config.properties.tmp")
-            tmp.outputStream().use { props.store(it, "MclyDownload Configuration") }
-            java.nio.file.Files.move(
-                tmp.toPath(),
-                configPath,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-            )
+            writeSettingsTo(configPath, settings)
         } catch (e: Exception) {
             AppLogger.warn("SettingsRepository", "保存配置失败: ${e.message}", e)
         }
+    }
+
+    /** 测试注入点：把设置写到指定路径；唯一 tmp / 互斥 / 回退由 [AtomicPropsFile] 保证。 */
+    internal fun writeSettingsTo(target: Path, settings: AppSettings) {
+        AtomicPropsFile.write(target, toProperties(settings), "MclyDownload Configuration")
     }
 
     /** 纯解析：从 properties 还原设置，不读磁盘，便于验证旧配置迁移。 */

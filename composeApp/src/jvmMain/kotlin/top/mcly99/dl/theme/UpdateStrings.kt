@@ -23,6 +23,8 @@ data class UpdateStrings(
     val downloading: String,
     val downloadFailed: String,
     val openFailed: String,
+    /** P1-08：Release 无 sha-256 digest，不允许自动安装 */
+    val untrustedRelease: String,
     val updateAvailableBadge: String,
 )
 
@@ -46,6 +48,7 @@ private fun zh() = UpdateStrings(
     downloading = "正在下载安装包…",
     downloadFailed = "下载失败，请稍后重试或前往 Release 页面手动下载。",
     openFailed = "无法打开安装包，请在下载目录手动打开。",
+    untrustedRelease = "该版本未提供校验摘要（SHA-256），已取消自动安装，请前往 Release 页面手动下载。",
     updateAvailableBadge = "有新版本",
 )
 
@@ -66,5 +69,6 @@ private fun en() = UpdateStrings(
     downloading = "Downloading installer…",
     downloadFailed = "Download failed. Try again later or get it from the Release page.",
     openFailed = "Could not open the installer. Please open it from the download folder.",
+    untrustedRelease = "This release has no SHA-256 digest; automatic install was cancelled. Please download it from the Release page.",
     updateAvailableBadge = "Update available",
 )

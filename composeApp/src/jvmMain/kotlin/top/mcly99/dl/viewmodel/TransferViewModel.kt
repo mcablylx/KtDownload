@@ -61,7 +61,13 @@ class TransferViewModel {
         /** 传输历史保留上限；超出后优先裁剪已结束的记录 */
         private const val MAX_TRANSFER_HISTORY = 200
     }
-    private val engine = TransferEngine()
+    // 网页上传服务器（P1-09：声明在 engine 之前，接收端复用同一枚配对 token）
+    private val webServer = WebUploadServer()
+
+    private val engine = TransferEngine().apply {
+        // 9877 接收与 8080 网页上传共用同一枚 token；发送端 sendFiles 会自动带 AUTH| 首行
+        accessToken = webServer.accessToken
+    }
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeTransfers = ConcurrentHashMap<String, Job>()
@@ -70,9 +76,6 @@ class TransferViewModel {
     /** 设备在线状态（由最后一次广播时间推导），供 UI 映射时使用 */
     var deviceOnline by mutableStateOf<Map<String, Boolean>>(emptyMap())
         private set
-
-    // 网页上传服务器
-    private val webServer = WebUploadServer()
 
     var saveDir: String
         get() = webServer.saveDir

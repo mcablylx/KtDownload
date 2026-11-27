@@ -46,10 +46,16 @@ class ThrottledInputStream(
  *
  * @param bytesPerSecond 允许的平均速率（字节/秒）；<= 0 表示不限速
  */
-class RateLimiter(@Volatile var bytesPerSecond: Long) {
+class RateLimiter(
+    @Volatile var bytesPerSecond: Long,
+    /** 可注入时钟（P2-28）：测试用虚拟时间把「不阻塞 / 取消及时」变成确定性断言 */
+    private val nanoTime: () -> Long = { System.nanoTime() },
+    /** 可注入休眠（P2-28）：测试只计数、不真的睡，避免 CI 负载抖动 */
+    private val sleep: (Long) -> Unit = { Thread.sleep(it) },
+) {
 
     private var tokens: Double = 0.0
-    private var lastRefillAt: Long = System.nanoTime()
+    private var lastRefillAt: Long = nanoTime()
     private val lock = Any()
 
     val enabled: Boolean get() = bytesPerSecond > 0
@@ -105,7 +111,7 @@ class RateLimiter(@Volatile var bytesPerSecond: Long) {
                 if (!isActive()) throw InterruptedIOException("下载已取消")
                 val slice = sleepLeft.coerceAtMost(SLEEP_SLICE_MS)
                 try {
-                    Thread.sleep(slice)
+                    sleep(slice)
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw InterruptedIOException("下载已取消")
@@ -117,7 +123,7 @@ class RateLimiter(@Volatile var bytesPerSecond: Long) {
 
     /** 按经过的时间补充令牌（调用方需持有 [lock]） */
     private fun refill() {
-        val now = System.nanoTime()
+        val now = nanoTime()
         val elapsedSec = (now - lastRefillAt) / 1_000_000_000.0
         if (elapsedSec <= 0) return
         lastRefillAt = now

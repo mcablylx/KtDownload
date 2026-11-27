@@ -19,25 +19,42 @@ data class UpdateInfo(
 )
 
 /**
+ * 安装包命名约定：`KtDownload-<版本>.<ext>`（版本段可带 `v` 前缀，大小写不敏感）。
+ * 同时供 [pickInstaller] 与 [UpdateDownloader] 的落盘文件名校验复用。
+ */
+internal val INSTALLER_NAME =
+    Regex("""^KtDownload-([vV]?[0-9][0-9A-Za-z.+_-]*)\.(exe|msi|dmg|pkg)$""", RegexOption.IGNORE_CASE)
+
+/**
  * 从 Release 的 assets 中挑选当前平台的安装包。
  *
- * 命名约定：`KtDownload-<版本>.<ext>`。按平台给出扩展名优先级：
- * - Windows：exe 优先（无需管理员即可运行），其次 msi；
- * - macOS：dmg 优先，其次 pkg；
- * - 其它平台：无可用包，返回 null。
+ * 按平台给出扩展名优先级：Windows exe → msi；macOS dmg → pkg；其它平台返回 null。
  *
- * 只按**小写扩展名**匹配，避免大小写差异导致漏选；同一扩展名有多个时取第一个
- * （GitHub 返回顺序即上传顺序，通常只有一个）。
+ * P1-08：只认 `KtDownload-<版本>.<ext>` 命名，避免 Release 里混入的其它 exe/dmg
+ * 被「按扩展名取首个」静默下载并执行；传 [version]（Release tag）时还要求版本段一致，
+ * tag 与产物名的 `v` 前缀两侧都做规范化（产物 `KtDownload-1.0.3.exe` vs tag `v1.0.3`）。
  */
-fun pickInstaller(assets: List<GitHubAsset>, platform: HostPlatform): GitHubAsset? {
+fun pickInstaller(
+    assets: List<GitHubAsset>,
+    platform: HostPlatform,
+    version: String? = null,
+): GitHubAsset? {
     val extensions = when (platform) {
         HostPlatform.WINDOWS -> listOf("exe", "msi")
         HostPlatform.MACOS -> listOf("dmg", "pkg")
         HostPlatform.UNSUPPORTED -> return null
     }
+    val expected = version?.trim()?.removePrefix("v")?.removePrefix("V")
     for (ext in extensions) {
-        assets.firstOrNull { it.name.substringAfterLast('.').lowercase() == ext }
-            ?.let { return it }
+        val found = assets.firstOrNull { asset ->
+            val match = INSTALLER_NAME.matchEntire(asset.name) ?: return@firstOrNull false
+            if (!match.groupValues[2].equals(ext, ignoreCase = true)) return@firstOrNull false
+            if (expected == null) return@firstOrNull true
+            match.groupValues[1]
+                .removePrefix("v").removePrefix("V")
+                .equals(expected, ignoreCase = true)
+        }
+        if (found != null) return found
     }
     return null
 }

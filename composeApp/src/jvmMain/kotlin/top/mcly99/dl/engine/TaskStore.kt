@@ -5,8 +5,10 @@ import top.mcly99.dl.model.DownloadTask
 import top.mcly99.dl.model.TaskType
 import top.mcly99.dl.utils.AppConstants
 import top.mcly99.dl.utils.AppLogger
+import top.mcly99.dl.utils.AtomicPropsFile
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.LocalDateTime
@@ -43,21 +45,16 @@ object TaskStore {
      */
     fun save(tasks: Collection<DownloadTask>) {
         try {
-            storePath.parent?.toFile()?.mkdirs()
-            val props = encode(tasks)
-            // 原子写入:先写 .tmp 再替换
-            val tmp = File(storePath.parent.toFile(), "tasks.properties.tmp")
-            tmp.outputStream().use { props.store(it, "KtDownload download tasks") }
-            java.nio.file.Files.move(
-                tmp.toPath(),
-                storePath,
-                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-            )
+            writeTasksTo(storePath, tasks)
             hardenPermissions()
         } catch (e: Exception) {
             AppLogger.warn("TaskStore", "保存任务失败: ${e.message}", e)
         }
+    }
+
+    /** 测试注入点：把任务写到指定路径；唯一 tmp / 互斥 / 回退由 [AtomicPropsFile] 保证。 */
+    internal fun writeTasksTo(target: Path, tasks: Collection<DownloadTask>) {
+        AtomicPropsFile.write(target, encode(tasks), "KtDownload download tasks")
     }
 
     /**
@@ -147,17 +144,19 @@ object TaskStore {
      *
      * 用户点击继续或开启"启动时自动开始"后可恢复下载（需要 Cookie 的除外，会提示重新抓取）。
      */
-    fun load(): List<DownloadTask> {
-        val file = storePath.toFile()
+    fun load(): List<DownloadTask> = readTasksFrom(storePath)
+
+    /** 测试注入点：从指定路径读取；「读时写」与写共用同一把可重入锁，不会自锁死。 */
+    internal fun readTasksFrom(target: Path): List<DownloadTask> {
+        val file = target.toFile()
         if (!file.exists()) return emptyList()
         return try {
-            val props = Properties()
-            file.inputStream().use { props.load(it) }
+            val props = AtomicPropsFile.read(target)
             val restored = decode(props)
             // v8-P0-1：旧版本曾把会话 Cookie 明文写盘。读到旧文件就立刻重写一次，
-            // 把凭证从磁盘上擦掉（`save` 只写 `cookieRequired`，不再写 `cookie`）。
+            // 把凭证从磁盘上擦掉（`writeTasksTo` 只写 `cookieRequired`，不再写 `cookie`）。
             if (hasPersistedCookie(props)) {
-                save(restored)
+                writeTasksTo(target, restored)
                 AppLogger.info("TaskStore", "已清除旧任务文件中的会话 Cookie（改为只记录 Cookie 需求）")
             }
             restored

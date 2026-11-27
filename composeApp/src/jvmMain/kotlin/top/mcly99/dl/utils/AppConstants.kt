@@ -36,6 +36,18 @@ object AppConstants {
     const val SOCKET_BUFFER_SIZE = 2 * 1024 * 1024
     const val SPEED_UPDATE_INTERVAL_MS = 200L
 
+    // ---- 局域网接收的信任与容量上限（P1-09）----
+    /** 单个接收文件上限，与网页上传单文件上限对齐（2 GB） */
+    const val MAX_TRANSFER_FILE_BYTES = 2L * 1024 * 1024 * 1024
+    /** 一条 TCP 连接累计上限，防止「大量小文件」绕开单文件限制（4 GB） */
+    const val MAX_TRANSFER_REQUEST_BYTES = 4L * 1024 * 1024 * 1024
+    /** 一条连接内最多接收的文件数 */
+    const val MAX_TRANSFER_FILES_PER_CONNECTION = 64
+    /** 同时处理的接收连接数 */
+    const val MAX_CONCURRENT_TRANSFERS = 4
+    /** 认证首行的等待上限：未认证连接不得靠 30s soTimeout 长期挂住 */
+    const val TRANSFER_AUTH_TIMEOUT_MS = 5_000
+
     // ---- 下载引擎 ----
     const val MULTI_THREAD_THRESHOLD_BYTES = 10L * 1024 * 1024
     const val CONNECT_TIMEOUT_MS = 15_000

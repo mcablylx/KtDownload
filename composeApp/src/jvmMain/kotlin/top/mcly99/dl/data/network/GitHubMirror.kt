@@ -173,14 +173,36 @@ object GitHubMirror {
         prefs.put(KEY_ENABLED, enabled.toString())
     }
 
+    /**
+     * 只接受 https 且无 userinfo / query / fragment 的镜像前缀（P1-08）。
+     * 返回规范化后带尾部 '/' 的形式；`http://` / `file://` / 带账号密码 / 畸形式一律返回 null。
+     *
+     * `yunx-misc.properties` 是明文可写的，所以不能只在 `setPrefix` 写入前校验，
+     * [activePrefix] / [fastestPrefix] 读取时还要再过滤一次。
+     */
+    fun sanitizePrefix(raw: String): String? {
+        val value = raw.trim()
+        if (value.isEmpty()) return null
+        val uri = runCatching { java.net.URI(value) }.getOrNull() ?: return null
+        if (uri.scheme?.equals("https", ignoreCase = true) != true) return null
+        if (uri.host.isNullOrBlank() || uri.userInfo != null) return null
+        if (uri.rawQuery != null || uri.rawFragment != null) return null
+        return value.trimEnd('/') + "/"
+    }
+
     /** 下游新增：固定前缀；传 null/空串表示「跟随自动测速结果」。 */
     fun setPrefix(prefix: String?) {
         val value = prefix?.trim().orEmpty()
         if (value.isEmpty()) {
             prefs.put(KEY_PREFIX, "")
-        } else {
-            prefs.put(KEY_PREFIX, value)
+            return
         }
+        val safe = sanitizePrefix(value)
+        if (safe == null) {
+            top.mcly99.dl.utils.AppLogger.warn(TAG, "忽略非法镜像前缀（仅接受 https）: $value")
+            return
+        }
+        prefs.put(KEY_PREFIX, safe)
     }
 
     /** 下游新增：当前固定前缀（空串表示未固定）。 */
@@ -190,10 +212,16 @@ object GitHubMirror {
     fun probes(): List<Probe> = snapshot.value.probes
 
     /** 当前最快的预选镜像：优先用本次测速结果，其次用上次持久化的结果 */
-    fun fastestPrefix(): String? =
-        snapshot.value.probes.mapNotNull { p -> p.speedBps?.let { bps -> p to bps } }
+    fun fastestPrefix(): String? {
+        val raw = snapshot.value.probes.mapNotNull { p -> p.speedBps?.let { bps -> p to bps } }
             .maxByOrNull { it.second }?.first?.prefix
             ?: prefs.get(KEY_FASTEST, null)?.takeIf { it.isNotBlank() }
+            ?: return null
+        val safe = sanitizePrefix(raw) ?: return null
+        // 自动测速产物必须来自内置 PRESETS：防止明文 yunx-misc.properties 里的
+        // KEY_FASTEST 被改成任意 https 主机，绕过「仅实测镜像生效」的规则（P1-08）。
+        return safe.takeIf { candidate -> PRESETS.any { it.equals(candidate, ignoreCase = true) } }
+    }
 
     /**
      * 当前生效的镜像前缀；空串 = 直连（见类注释的生效规则）。
@@ -203,7 +231,8 @@ object GitHubMirror {
      */
     fun activePrefix(): String {
         if (!isEnabled()) return ""
-        fixedPrefix().takeIf { it.isNotBlank() }?.let { return it }
+        // 读取时再过滤一次：配置是明文文件，可能被外部改成 http:// 或带 userinfo 的地址
+        fixedPrefix().takeIf { it.isNotBlank() }?.let { return sanitizePrefix(it).orEmpty() }
         return fastestPrefix().orEmpty()
     }
 
