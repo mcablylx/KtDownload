@@ -59,6 +59,7 @@ import top.mcly99.dl.model.ViewType
 import top.mcly99.dl.theme.FlowDownColors
 import top.mcly99.dl.theme.FlowDownTheme
 import top.mcly99.dl.theme.Strings
+import top.mcly99.dl.theme.myDriveStrings
 import top.mcly99.dl.APP_VERSION
 
 data class SidebarStats(val total: Int, val downloading: Int, val completed: Int)
@@ -69,7 +70,7 @@ fun SidebarPanel(
     onViewChange: (ViewType) -> Unit,
     stats: SidebarStats,
     /** P4「我的网盘」标题：独立文案表，刻意不给 UiStrings 增加构造槽位 */
-    myDriveLabel: String = "我的网盘",
+    myDriveLabel: String = myDriveStrings(Strings.current.language).title,
     /** 有新版本可用时在版本号旁显示角标 */
     updateAvailable: Boolean = false,
     modifier: Modifier = Modifier,

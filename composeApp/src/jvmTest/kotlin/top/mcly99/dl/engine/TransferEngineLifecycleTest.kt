@@ -3,7 +3,6 @@ package top.mcly99.dl.engine
 import kotlinx.coroutines.runBlocking
 import top.mcly99.dl.testutil.awaitUntil
 import java.io.File
-import java.net.ServerSocket
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -18,11 +17,13 @@ import kotlin.test.assertTrue
  */
 class TransferEngineLifecycleTest {
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+    // P3-06：传 0 让每次 bind 都由 OS 分配空闲端口，彻底避开全量并行时的临时端口竞争。
+    // 旧写法 ServerSocket(0) 取到端口后先关闭，窗口期常被别的测试/进程抢占。
+    private val osAssignedPort = 0
 
     @Test
     fun concurrent_start_stop_and_restart_keep_a_single_file_server() = runBlocking {
-        val engine = TransferEngine(transferPort = freePort())
+        val engine = TransferEngine(transferPort = osAssignedPort)
         // 关掉 UDP 发现，避免测试与默认引擎抢占固定的 9876 端口
         engine.setDiscoveryEnabled(false)
         val pool = Executors.newFixedThreadPool(4)

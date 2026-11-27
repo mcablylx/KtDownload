@@ -408,35 +408,54 @@ class TransferEngine(
         // P2-03：同 startDiscovery，用作用域快照做发布守卫
         val myScope = scope
         serverJob = myScope.launch {
-            // 端口占用时只停用文件接收，不影响界面与其它功能
-            val ss = try {
-                ServerSocket().apply {
-                    reuseAddress = true
-                    bind(java.net.InetSocketAddress(transferPort), 50)
+            // P3-06 延伸：并发 stop/start 时端口可能被旧监听短暂占用，或别的进程正巧抢走；
+            // 旧实现一次 bind 失败就让文件接收永久降级，重启后也不再尝试。重试 3 次再放弃。
+            var boundSocket: ServerSocket? = null
+            var bindError: Exception? = null
+            repeat(3) { attempt ->
+                if (!currentCoroutineContext().isActive) return@launch
+                val candidate = try {
+                    ServerSocket().apply {
+                        reuseAddress = true
+                        bind(java.net.InetSocketAddress(transferPort), 50)
+                    }
+                } catch (e: Exception) {
+                    bindError = e
+                    null
                 }
-            } catch (e: Exception) {
+                if (candidate != null) {
+                    boundSocket = candidate
+                    return@repeat
+                }
+                if (attempt < 2) delay(100)
+            }
+            val server = boundSocket
+            if (server == null) {
                 synchronized(lifecycleLock) { if (scope === myScope) fileServerRunning = false }
-                AppLogger.warn("TransferEngine", "文件接收不可用：TCP ${AppConstants.TRANSFER_PORT} 绑定失败(${e.message})，功能降级运行", e)
+                AppLogger.warn(
+                    "TransferEngine",
+                    "文件接收不可用：TCP $transferPort 绑定失败(${bindError?.message})，功能降级运行",
+                )
                 return@launch
             }
             val published = synchronized(lifecycleLock) {
                 if (scope !== myScope) false
                 else {
-                    serverSocket = ss
+                    serverSocket = server
                     fileServerRunning = true
                     true
                 }
             }
             if (!published) {
-                closeQuietly(ss, "TransferEngine")
+                closeQuietly(server, "TransferEngine")
                 return@launch
             }
             try {
                 while (currentCoroutineContext().isActive) {
                     val clientSocket = try {
-                        ss.accept()
+                        server.accept()
                     } catch (e: java.io.IOException) {
-                        if (!currentCoroutineContext().isActive || ss.isClosed) break else throw e
+                        if (!currentCoroutineContext().isActive || server.isClosed) break else throw e
                     }
                     if (!transferSemaphore.tryAcquire()) {
                         AppLogger.warn("TransferEngine", "接收并发已达上限，拒绝新连接")
@@ -460,11 +479,11 @@ class TransferEngine(
                         fileServerRunning = false
                     }
                 }
-                closeQuietly(ss, "TransferEngine")
+                closeQuietly(server, "TransferEngine")
             }
         }
     }
-    
+
     /**
      * 处理接收到的文件。
      *

@@ -4,6 +4,7 @@ import top.mcly99.dl.utils.AppConstants
 import java.io.File
 import java.net.URL
 import java.net.URLDecoder
+import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -45,6 +46,42 @@ internal fun extractFileName(
     sanitizeDownloadFileName(decoded, fallback = "download_$fallbackTimeMillis")
 } catch (_: Exception) {
     "download_$fallbackTimeMillis"
+}
+
+/**
+ * P3-06：解析 RFC 6266 `Content-Disposition` 中的文件名。
+ *
+ * `filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf` 优先于普通 `filename=`；
+ * 两者都解析不出时返回 [fallback]。结果仍交给 [sanitizeDownloadFileName] 清洗，
+ * 因此 `../../etc/passwd` 只会得到 `passwd`，不会形成路径穿越。
+ *
+ * 注意：本函数只提供解析能力。主链路在任务入队时就要确定 savePath 与分片目录，
+ * 此时还没有响应头；下载开始后再改名会牵动去重、`.partN`/`.offset` 与清理路径，
+ * 风险高于收益，故当前未接入（云盘直链本身已带 `filename`）。
+ */
+internal fun extractFileNameFromContentDisposition(
+    header: String?,
+    fallback: String,
+): String {
+    if (header.isNullOrBlank()) return fallback
+    val extended = Regex(
+        """filename\*\s*=\s*([^';]*)(?:'[^']*)?'([^;]+)""",
+        RegexOption.IGNORE_CASE,
+    ).find(header)
+    if (extended != null) {
+        val charset = runCatching { Charset.forName(extended.groupValues[1].ifBlank { "UTF-8" }) }
+            .getOrDefault(StandardCharsets.UTF_8)
+        val raw = extended.groupValues[2].trim().trim('"')
+        val decoded = runCatching { URLDecoder.decode(raw, charset) }.getOrDefault(raw)
+        val cleaned = sanitizeDownloadFileName(decoded, fallback)
+        if (cleaned != fallback) return cleaned
+    }
+    val plain = Regex("""filename\s*=\s*(?:"([^"]*)"|([^;]+))""", RegexOption.IGNORE_CASE)
+        .find(header)
+        ?.let { it.groupValues[1].ifBlank { it.groupValues[2] }.trim() }
+    return plain?.takeIf { it.isNotBlank() }
+        ?.let { sanitizeDownloadFileName(it, fallback) }
+        ?: fallback
 }
 
 /**

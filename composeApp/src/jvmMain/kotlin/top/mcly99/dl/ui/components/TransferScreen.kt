@@ -91,7 +91,7 @@ fun TransferScreen(
     webServerPort: Int = AppConstants.DEFAULT_WEB_PORT,
     discoveryRunning: Boolean = true,
     fileServerRunning: Boolean = true,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
     modifier: Modifier = Modifier,
 ) {
     val s = Strings.current
@@ -150,7 +150,7 @@ private fun DevicesTab(
     onSendFolderToDevice: (String) -> Unit = {},
     discoveryRunning: Boolean = true,
     fileServerRunning: Boolean = true,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
 ) {
     val s = Strings.current
 
@@ -197,7 +197,7 @@ private fun DevicesTab(
 @Composable
 private fun DeviceRow(
     device: UiDevice,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
     onSendFile: () -> Unit = {},
     onSendFolder: () -> Unit = {},
 ) {
@@ -305,7 +305,7 @@ private fun WebTab(
     serverRunning: Boolean,
     serverError: Boolean = false,
     serverPort: Int = settings.lanServerPort,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
     onLanServerEnabled: (Boolean) -> Unit,
     onCopiedChange: (Boolean) -> Unit,
 ) {
@@ -432,7 +432,7 @@ private fun WebTab(
 @Composable
 private fun HistoryTab(
     transfers: List<UiTransfer>,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
     onCancelTransfer: (String) -> Unit = {},
     onRemoveTransfer: (String) -> Unit = {},
     onClearFinished: () -> Unit = {},
@@ -496,7 +496,7 @@ private fun HistoryTab(
 @Composable
 private fun TransferRow(
     transfer: UiTransfer,
-    extra: TransferExtraStrings = transferExtraStrings("zh-CN"),
+    extra: TransferExtraStrings = transferExtraStrings(Strings.current.language),
     onCancel: () -> Unit = {},
     onRemove: () -> Unit = {},
 ) {

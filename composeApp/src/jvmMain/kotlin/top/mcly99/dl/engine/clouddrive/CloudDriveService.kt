@@ -284,14 +284,9 @@ class CloudDriveService(
         return fresh.first to next.refreshToken
     }
 
-    /**
-     * 一次性注入固定代理（保留给只想给云盘链路指定代理的场景）。
-     * 应用主路径走 [HttpClients.setProxyProvider] 的现取 lambda，这样「跟随系统」也能生效；
-     * 这里原样传入 [Proxy]，SOCKS 类型不会再被拆成 host/port 时丢失。
-     */
-    fun applyProxy(proxy: Proxy?) {
-        HttpClients.setProxy(proxy)
-    }
+    // P3-06：删除旧的一次性 applyProxy(Proxy?) —— 它会把 HttpClients 的现取
+    // proxyProvider 覆盖成固定快照（跟随系统 / 用户改设置后云盘链路不跟随）。
+    // 该入口全仓无调用点；主路径统一走 HttpClients.setProxyProvider。
 
     override fun parse(text: String): ParsedShareRef? {
         ShareLinkParser.parse(text)?.let { return ParsedShareRef(it.shareId, it.pwd, it.platform) }

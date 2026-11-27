@@ -10,7 +10,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import ktdownload.composeapp.generated.resources.Res
-import ktdownload.composeapp.generated.resources.img_log
+import ktdownload.composeapp.generated.resources.img_logo
 import org.jetbrains.compose.resources.painterResource
 import top.mcly99.dl.engine.clouddrive.browser.JcefHolder
 import top.mcly99.dl.data.SettingsRepository
@@ -219,7 +219,8 @@ private fun raiseWindow(window: java.awt.Window?) {
 
 private fun runUi() {
     application {
-        val icon = painterResource(Res.drawable.img_log)
+        // P3-01：窗口 / 侧栏 / 托盘统一用 img_logo.png，避免 .ico 经 Skia 解码走不同路径
+        val icon = painterResource(Res.drawable.img_logo)
         val initialSettings = remember { SettingsRepository.load() }
         // 窗口标题 / 托盘文案必须跟随运行时语言：以前是 remember(initialSettings.language)
         // 的启动快照，在设置里切换语言后只有界面内容变了，标题栏和托盘菜单还是旧语言（P2-22）。

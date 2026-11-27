@@ -57,6 +57,37 @@ class DownloadFileSupportTest {
         assertTrue(name.endsWith(".zip"))
     }
 
+    // ---- P3-06：Content-Disposition 文件名解析 ----
+
+    @Test
+    fun content_disposition_plain_filename_is_used() {
+        assertEquals(
+            "report.pdf",
+            extractFileNameFromContentDisposition("attachment; filename=\"report.pdf\"", "fallback.bin"),
+        )
+    }
+
+    @Test
+    fun content_disposition_extended_filename_wins_and_is_decoded() {
+        val header = "attachment; filename=\"ascii.pdf\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf"
+        assertEquals("报告.pdf", extractFileNameFromContentDisposition(header, "fallback.bin"))
+    }
+
+    @Test
+    fun content_disposition_without_usable_name_falls_back() {
+        assertEquals("fallback.bin", extractFileNameFromContentDisposition(null, "fallback.bin"))
+        assertEquals("fallback.bin", extractFileNameFromContentDisposition("attachment", "fallback.bin"))
+    }
+
+    @Test
+    fun content_disposition_cannot_escape_the_download_directory() {
+        val name = extractFileNameFromContentDisposition(
+            "attachment; filename=\"../../etc/passwd\"",
+            "fallback.bin",
+        )
+        assertEquals("passwd", name)
+    }
+
     @Test
     fun resolves_only_existing_directories_as_directories() {
         val dir = Files.createTempDirectory("ktdown-resolve")

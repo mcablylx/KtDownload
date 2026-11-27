@@ -67,6 +67,7 @@ import top.mcly99.dl.model.ViewType
 import top.mcly99.dl.theme.FlowDownColors
 import top.mcly99.dl.theme.FlowDownTheme
 import top.mcly99.dl.theme.Strings
+import top.mcly99.dl.theme.myDriveStrings
 import top.mcly99.dl.utils.formatSpeed
 
 /**
@@ -116,7 +117,7 @@ fun HeaderBar(
     catchWeb: CatchWebHeaderState = CatchWebHeaderState(),
     cloudDrive: CloudDriveHeaderState = CloudDriveHeaderState(),
     /** P4「我的网盘」标题：独立文案表，不给 UiStrings 增加构造槽位 */
-    myDriveTitle: String = "我的网盘",
+    myDriveTitle: String = myDriveStrings(Strings.current.language).title,
     modifier: Modifier = Modifier,
 ) {
     val s = Strings.current
