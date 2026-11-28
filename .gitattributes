@@ -1,0 +1,11 @@
+# 换行符策略。
+#
+# 为什么需要显式声明：仓库里的 .bat 一直以 LF 存进 index，Windows 上靠
+# core.autocrlf=true 在 checkout 时转成 CRLF，于是「本机看着没问题」；
+# 而 Linux/macOS 的 checkout 不转换，落到 CI 上的就是 LF 文件，
+# BuildInfraContractTest.installer_bat_is_crlf_and_does_not_block_automation 因此失败。
+#
+# eol=crlf 让**任何平台**的 checkout 都产出 CRLF，而 index 里仍统一存 LF：
+# 既保证 Windows 上双击能跑，也让三平台的工作区内容一致。
+*.bat text eol=crlf
+*.cmd text eol=crlf

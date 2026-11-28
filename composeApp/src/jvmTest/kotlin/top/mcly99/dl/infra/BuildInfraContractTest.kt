@@ -133,7 +133,9 @@ class BuildInfraContractTest {
     @Test
     fun installer_bat_is_crlf_and_does_not_block_automation() {
         val text = repoFile("package-installer.bat").readBytes().toString(Charsets.UTF_8)
-        assertTrue(text.contains("\r\n"), "bat 必须是 CRLF 换行")
+        // 换行必须由 .gitattributes 的 `*.bat text eol=crlf` 保证：
+        // 只靠 Windows 上的 core.autocrlf=true，Linux/macOS 的 checkout 会拿到 LF 文件
+        assertTrue(text.contains("\r\n"), "bat 必须是 CRLF 换行（.gitattributes 的 eol=crlf 负责，不能只靠 autocrlf）")
         assertEquals(0, text.replace("\r\n", "").count { it == '\n' }, "bat 不能有裸 LF 行尾")
         assertTrue(text.contains("if not defined CI pause"), "CI 下的 pause 必须可跳过")
     }

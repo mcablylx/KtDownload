@@ -11,6 +11,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -22,6 +23,8 @@ import kotlin.test.assertTrue
 class HttpProbeTest {
 
     private lateinit var server: HttpServer
+    /** 跨域重定向的目标服务器：与 [server] 用不同 host 名，验证 Cookie 不会跟着走 */
+    private lateinit var crossServer: HttpServer
     private lateinit var executor: ExecutorService
     private lateinit var baseUrl: String
     private val lastReferer = AtomicReference<String?>(null)
@@ -31,7 +34,7 @@ class HttpProbeTest {
     @BeforeTest
     fun setUp() {
         executor = Executors.newFixedThreadPool(4)
-        // 通配绑定：127.0.0.2 也指向本机，用它模拟「跨域」但不依赖真实外网
+        // 通配绑定：同一个端口上同时服务 127.0.0.1 与 localhost 两种访问方式
         server = HttpServer.create(InetSocketAddress(0), 0)
         server.executor = executor
 
@@ -54,17 +57,32 @@ class HttpProbeTest {
             exchange.responseBody.use { it.write(body) }
         }
 
-        // 跨域重定向（127.0.0.1 → 127.0.0.2）：目标端点记录是否收到 Cookie
+        // 跨域重定向（127.0.0.1 → localhost）：目标端点记录是否收到 Cookie。
+        //
+        // 这里不能再用 127.0.0.2 冒充「另一个主机」——Linux 把整个 127/8 路由到 lo，
+        // macOS 的 lo0 默认只配 127.0.0.1，连 127.0.0.2 会直接连接失败（要手动
+        // `ifconfig lo0 alias 127.0.0.2` 才行），于是这条用例只有 Linux 能过。
+        // 改用 localhost：与 127.0.0.1 在 HttpRedirects.sameHost 里就是两个 host
+        // （HttpRedirectsTest 已钉死这个语义），而且任何平台都连得通。
         server.createContext("/cross-redirect.m3u8") { exchange ->
-            exchange.responseHeaders.add("Location", "http://127.0.0.2:${server.address.port}/cross-target.m3u8")
+            exchange.responseHeaders.add(
+                "Location",
+                "http://localhost:${crossServer.address.port}/cross-target.m3u8",
+            )
             exchange.sendResponseHeaders(302, -1)
             exchange.close()
         }
-        server.createContext("/cross-target.m3u8") { exchange ->
-            crossTargetCookie.set(exchange.requestHeaders.getFirst("Cookie"))
-            val body = "#EXTM3U\ncross-v.m3u8\n".toByteArray(StandardCharsets.UTF_8)
-            exchange.sendResponseHeaders(200, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+        // 目标服务器按 localhost 绑定：localhost 解析成 ::1 还是 127.0.0.1 都自洽，
+        // 不依赖「通配绑定恰好也覆盖另一个回环地址」这种平台差异
+        crossServer = HttpServer.create(InetSocketAddress("localhost", 0), 0).apply {
+            executor = this@HttpProbeTest.executor
+            createContext("/cross-target.m3u8") { exchange ->
+                crossTargetCookie.set(exchange.requestHeaders.getFirst("Cookie"))
+                val body = "#EXTM3U\ncross-v.m3u8\n".toByteArray(StandardCharsets.UTF_8)
+                exchange.sendResponseHeaders(200, body.size.toLong())
+                exchange.responseBody.use { it.write(body) }
+            }
+            start()
         }
 
         server.createContext("/empty.m3u8") { exchange ->
@@ -127,6 +145,7 @@ class HttpProbeTest {
 
     @AfterTest
     fun tearDown() {
+        if (this::crossServer.isInitialized) crossServer.stop(0)
         server.stop(0)
         executor.shutdownNow()
     }
@@ -161,7 +180,13 @@ class HttpProbeTest {
     @Test
     fun cookie_not_leaked_on_cross_host_redirect() {
         val text = HttpProbe().fetchText("$baseUrl/cross-redirect.m3u8", cookie = "STOKEN=secret")
-        assertTrue(text!!.startsWith("#EXTM3U"))
+        // fetchText 出错时返回 null；直接 !! 只会给出一句没有上下文的 NPE，
+        // 连不上时完全看不出是「连接失败」还是「响应不是 2xx」
+        assertNotNull(
+            text,
+            "跨域重定向的目标必须可达：127.0.0.1 → localhost 应当是同一台机器的不同 host 名",
+        )
+        assertTrue(text.startsWith("#EXTM3U"))
         assertNull(crossTargetCookie.get(), "会话 Cookie 不得随跨域重定向发送到第三方主机")
     }
 

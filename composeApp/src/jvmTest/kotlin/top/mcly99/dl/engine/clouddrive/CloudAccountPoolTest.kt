@@ -204,9 +204,16 @@ class CloudAccountPoolTest {
                 PosixFilePermissions.fromString("rw-------"),
                 Files.getPosixFilePermissions(file),
             )
+            // 主密钥在 keys/ 子目录（P3-08 的布局），不能按 dataDir 根部去猜路径：
+            // 写得不对时 Windows 上被 posix 判断整体跳过，只有 Linux/macOS 的 CI 才会暴露
             assertEquals(
                 PosixFilePermissions.fromString("rw-------"),
-                Files.getPosixFilePermissions(dir.resolve("cloud-credentials.key")),
+                Files.getPosixFilePermissions(CloudCredentialKeyStore.keyFile(dir)),
+            )
+            assertEquals(
+                PosixFilePermissions.fromString("rwx------"),
+                Files.getPosixFilePermissions(CloudCredentialKeyStore.keyDir(dir)),
+                "keys/ 目录必须是 0700，否则同机其他用户能读到密钥文件名",
             )
         }
 
