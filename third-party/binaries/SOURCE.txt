@@ -7,10 +7,12 @@ from the network. The packaging scripts restore these into the locations the
 build expects, verifying SHA-256 before use.
 
 > NOTE (P2-25, 2026-11-27): this repository uses sparse-checkout with
-> `!/third-party/binaries/`, so a normal clone does NOT check out this directory.
-> The promise "clone and package fully offline" only holds once the archives
-> listed below are actually present. The Chinese section at the end documents
-> the current per-platform status and how to verify / inject a checksum.
+> `!/third-party/binaries/` plus an explicit `/third-party/binaries/SOURCE.txt`
+> exception, so a normal clone checks out ONLY this manifest — the archives
+> themselves stay out of the working tree. The promise "clone and package
+> fully offline" only holds once the archives listed below are actually present.
+> The Chinese section at the end documents the current per-platform status and
+> how to verify / inject a checksum.
 
 Files
 -----
@@ -50,9 +52,9 @@ P2-25 补充说明：预置归档与 SHA-256 校验现状（2026-11-27）
 
 sparse-checkout 现状
 --------------------
-本仓库 `git sparse-checkout list` 为 `/*` + `!/third-party/binaries/`：
-默认 clone **不会检出本目录**，工作区里看不到上面的归档（走查时工作区确实
-没有该目录），但 git 中一直保有一份 `SOURCE.txt` 清单。README 里
+本仓库 `git sparse-checkout list` 为 `/*` + `!/third-party/binaries/` +
+`/third-party/binaries/SOURCE.txt`：默认 clone **不检出本目录里的归档**，
+工作区里只看得到这份清单（走查时工作区确实没有归档文件）。README 里
 「clone 后直接打包即可，全程不联网」只在归档确实齐全时才成立；缺文件时
 脚本会回退到联网下载 / 源码编译。请先用 `ls third-party/binaries/` 确认。
 
@@ -70,7 +72,9 @@ macOS（唯一随仓库分发的预置归档；SHA 同时写在 build.gradle.kts
 Windows / Linux（本仓库不预置，走联网下载；没有内置期望 SHA）
   vlc-3.0.21.zip       SHA-256 = <未提供>  来源 = videolan 3.0.21 win64
   upx-4.2.4.zip        SHA-256 = <未提供>  来源 = UPX 4.2.4 win64
-  vlc-3.0.21.jar       SHA-256 = <未提供>  来源 = videolan 3.0.21 linux
+  vlc-3.0.20-2.jar     SHA-256 = <未提供>  来源 = Maven Central ir.mahozad:vlc-plugins-linux:3.0.20-2
+                       ↑ 不是 3.0.21：vlc-setup 0.1.0 的 LinuxTasksConfigure.kt 把版本硬编成
+                         "3.0.20-2"（作者留了 FIXME），落盘名与 vlcBundleVersion 无关
   upx-4.2.4.tar.xz     SHA-256 = <未提供>  来源 = UPX 4.2.4 linux
   ffmpeg-n*-win64-lgpl-*.zip
       SHA-256 = 见 scripts/fetch-ffmpeg.ps1 的 $ExpectedSha256（该脚本已强制校验）
