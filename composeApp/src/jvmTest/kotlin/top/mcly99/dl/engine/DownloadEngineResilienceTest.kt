@@ -52,6 +52,11 @@ class DownloadEngineResilienceTest {
 
     private val data = ByteArray(256 * 1024) { (it * 37 + 13).toByte() }
 
+    private companion object {
+        /** 4 PiB：任何本机磁盘都装不下，用来触发空间预检 */
+        const val HUGE_SIZE = 1L shl 52
+    }
+
     @BeforeTest
     fun setUp() {
         probeRangeHits.set(0)
@@ -77,6 +82,17 @@ class DownloadEngineResilienceTest {
         server.createContext("/flaky") { exchange -> serve(exchange, failFirst = 2, concurrencyLimit = Int.MAX_VALUE) }
         // 最多允许 2 条并发收数据，超出回 503（E 项）
         server.createContext("/limited") { exchange -> serve(exchange, failFirst = 0, concurrencyLimit = 2) }
+        // 声明一个远超本机容量的长度，只回应探测；真来 GET 就直接 503（附：磁盘空间预检）
+        server.createContext("/huge") { exchange ->
+            if (exchange.requestMethod.equals("HEAD", ignoreCase = true)) {
+                exchange.responseHeaders.add("Accept-Ranges", "bytes")
+                exchange.responseHeaders.add("Content-Length", HUGE_SIZE.toString())
+                exchange.sendResponseHeaders(200, -1)
+            } else {
+                exchange.sendResponseHeaders(503, -1)
+            }
+            exchange.close()
+        }
         server.start()
         engine = DownloadEngine(
             taskPersistenceEnabled = false,
@@ -146,6 +162,27 @@ class DownloadEngineResilienceTest {
         assertTrue(
             rejectedByConcurrency.get() <= 4,
             "被拒次数应有限（学一次就够），实际 ${rejectedByConcurrency.get()}",
+        )
+    }
+
+    /**
+     * 磁盘空间预检的接线：远端声明 4 PiB，本机不可能装得下，必须在写第一个字节之前就失败，
+     * 并且失败原因要是人话（「空间不足」），而不是下到一半的 `IOException: not enough space`。
+     */
+    @Test
+    fun a_file_larger_than_the_disk_fails_before_any_byte_is_written() {
+        val target = tempDir.resolve("huge.bin")
+        val task = download("/huge", target, totalSize = HUGE_SIZE, threads = 4)
+
+        assertEquals(DownloadStatus.FAILED, task.status, "装不下的文件不该开始下载")
+        assertTrue(
+            task.errorMessage.orEmpty().contains("空间不足"),
+            "失败原因要说清是磁盘不够：${task.errorMessage}",
+        )
+        assertTrue(!target.exists(), "不该留下目标文件")
+        assertTrue(
+            !partialDownloadFile(target).exists(),
+            "预检失败时不该已经建出临时文件",
         )
     }
 

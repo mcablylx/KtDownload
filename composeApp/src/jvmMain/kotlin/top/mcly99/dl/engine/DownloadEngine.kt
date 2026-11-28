@@ -700,6 +700,21 @@ class DownloadEngine(
                 return
             }
 
+            // 空间预检放在「决定单线程还是多线程」之前：两条路径写的是同一块磁盘，
+            // 而稀疏预扩展会立刻按最终长度占位，所以越早拦住越划算。
+            // restart 时旧临时文件马上会被删掉，不能拿它的长度抵扣。
+            val targetFile = current.savePath.toFile()
+            val spaceIssue = DiskSpaceGuard.check(
+                target = targetFile,
+                totalSize = totalSize,
+                alreadyOnDisk = if (restart) 0L else DiskSpaceGuard.existingBytes(targetFile),
+            )
+            if (spaceIssue != null) {
+                AppLogger.warn("DownloadEngine", "拒绝开始下载：$spaceIssue（${task.fileName}）")
+                updateTask(taskId, event = DownloadEvent.FAIL, errorMessage = spaceIssue, speed = 0L)
+                return
+            }
+
             // 小文件本来就走单线程，连「支不支持分段」都不必问：懒求值，
             // 否则每次小文件下载都白多一个 Range 请求（这个断言在集成测试里钉死）
             if (totalSize < multiThreadThresholdBytes) {
