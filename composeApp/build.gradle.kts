@@ -214,7 +214,14 @@ compose.desktop {
             // （Compose 会把 common 与当前平台目录合并到同一个 app resources 根下）
             appResourcesRootDir.set(rootProject.layout.projectDirectory.dir("resources"))
             jvmArgs += listOf("--enable-native-access=ALL-UNNAMED", "--add-opens=java.base/java.nio=ALL-UNNAMED") + jcefModuleArgs
-            targetFormats(TargetFormat.Exe, TargetFormat.Msi, TargetFormat.Dmg, TargetFormat.Pkg)
+            targetFormats(
+                TargetFormat.Exe, TargetFormat.Msi, TargetFormat.Dmg, TargetFormat.Pkg,
+                // Linux 用 deb：此前只配了 Windows/macOS 的四种格式，导致 Linux 上
+                // packageReleaseDistributionForCurrentOS 没有任何可执行子任务、
+                // 直接 UP-TO-DATE 且不产出 main-release/（Release 流水线的
+                // "Collect installers" 因此 find 到空目录而失败）。
+                TargetFormat.Deb,
+            )
             packageName = "KtDownload"
             packageVersion = appVersion
             description = "A powerful download manager"
@@ -248,7 +255,14 @@ compose.desktop {
             }
 
             linux {
-                iconFile = file("src/jvmMain/composeResources/drawable/img_log.ico")
+                // jpackage 打 deb 时图标必须是 png（.ico 只用于 Windows），
+                // 且包名只能是小写字母数字 —— 直接用全局的 "KtDownload" 会被拒绝。
+                iconFile = file("src/jvmMain/composeResources/drawable/img_logo.png")
+                packageName = "ktdownload"
+                // deb 的 Maintainer 字段是必填的，jpackage 不会替我们猜。
+                debMaintainer = "mcablylx <308380504@qq.com>"
+                appCategory = "Network"
+                shortcut = true
             }
         }
     }

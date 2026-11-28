@@ -66,9 +66,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          find composeApp/build/compose/binaries/main-release -type f \
-            \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.pkg' \
-               -o -name '*.deb' -o -name '*.rpm' \) -exec cp -n {} dist/ \;
+          # 目标格式是按平台生效的（Windows: exe/msi，macOS: dmg/pkg，Linux: deb）。
+          # 目录不存在说明该平台没产出安装包，这本身不该让 job 红 —— 给出明确警告即可，
+          # 否则一个平台的打包配置遗漏会连带整个 release 都建不出来。
+          if [ -d composeApp/build/compose/binaries/main-release ]; then
+            find composeApp/build/compose/binaries/main-release -type f \
+              \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.pkg' \
+                 -o -name '*.deb' -o -name '*.rpm' \) -exec cp -n {} dist/ \;
+          else
+            echo "::warning::composeApp/build/compose/binaries/main-release 不存在，本平台未产出安装包"
+          fi
           ls -lh dist
 
       - name: Upload installers
