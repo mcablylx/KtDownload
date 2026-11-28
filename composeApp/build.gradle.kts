@@ -309,7 +309,11 @@ tasks.matching { it.name == "prepareAppResources" }.configureEach {
 // 落地名按插件实现（三个平台不一样，见插件源码；注意 macOS 的本地文件名不带 -universal）：
 //   Windows  vlc-3.0.21.zip            / upx-4.2.4.zip
 //   macOS    vlc-3.0.21.dmg            （下载源是 -universal.dmg；UPX 随插件附带，没有 upxDownload 任务）
-//   Linux    vlc-3.0.21.jar            / upx-4.2.4.tar.xz
+//   Linux    vlc-3.0.20-2.jar          / upx-4.2.4.tar.xz
+//            ↑ 注意不是 3.0.21：vlc-setup 0.1.0 的 LinuxTasksConfigure.kt 把版本硬编成
+//            "3.0.20-2"（作者自己留了 FIXME: vlcSetupExtension.vlcVersion），
+//            所以 Linux 的归档名与上面的 vlcBundleVersion 无关。下面统一用
+//            cachedVlcArchive() 解析，不把插件的内部版本号抄进本脚本。
 val vlcArchiveName = when {
     osName.contains("win") -> "vlc-$vlcBundleVersion.zip"
     osName.contains("mac") -> "vlc-$vlcBundleVersion.dmg"
@@ -321,6 +325,20 @@ val upxArchiveName = when {
     else -> "upx-$upxBundleVersion.tar.xz"
 }
 val vlcSetupCacheDir = gradle.gradleUserHomeDir.resolve("vlcSetup")
+
+// 解析「vlc-setup 插件实际下载到缓存里的那个归档」。
+// Windows / macOS 的文件名由 vlcArchiveName 决定（与插件固定一致），直接拼即可；
+// Linux 的版本被插件硬编成 3.0.20-2（见上方说明），拼名字必然踩空，改成按前缀扫描，
+// 插件以后修好 FIXME 也不必再改这里。
+// 返回 null 表示缓存里还没有归档（尚未下载 / 已被清理）。
+fun cachedVlcArchive(): File? {
+    if (!osName.contains("win") && !osName.contains("mac")) {
+        return vlcSetupCacheDir
+            .listFiles { f -> f.isFile && f.name.startsWith("vlc-") && f.extension == "jar" }
+            ?.maxByOrNull { it.lastModified() }
+    }
+    return vlcSetupCacheDir.resolve(vlcArchiveName).takeIf { it.isFile }
+}
 
 // 可选预置归档（third-party/binaries/）：归档齐全时 clone 后无需联网即可打包。
 // 默认 sparse-checkout 会排除该目录，仓库里只有 SOURCE.txt 清单；缺归档时
@@ -379,8 +397,9 @@ val restoreVlcFromRepo by tasks.registering {
 }
 tasks.matching { it.name == "vlcDownload" }.configureEach {
     dependsOn(restoreVlcFromRepo)
-    val archive = vlcSetupCacheDir.resolve(vlcArchiveName)
-    onlyIf("压缩包已预置在 $vlcSetupCacheDir") { !archive.isFile }
+    // 用 cachedVlcArchive() 而不是固定文件名：Linux 上插件的落盘名与 vlcBundleVersion 无关，
+    // 拿固定名判断会让 onlyIf 永远成立、离线预置永远失效。
+    onlyIf("压缩包已预置在 $vlcSetupCacheDir") { cachedVlcArchive() == null }
 }
 upxArchiveName?.let { name ->
     tasks.matching { it.name == "upxDownload" }.configureEach {
@@ -430,23 +449,32 @@ val vlcPlatformDir = when {
 //   - 没有期望 SHA → 明确告警「本次未校验」，不再静默跳过。
 // 挂在 prepareAppResources 之后、pruneBundledVlc 之前，保证下载/还原已经完成，
 // 且损坏或被替换的归档不会进入安装包。
+//
+// 这里刻意**不**把归档声明成任务输入（inputs 文件）：Linux 上插件的落盘名与
+// vlcBundleVersion 无关（见 cachedVlcArchive 的说明），一旦声明为输入，就会在
+// 配置校验阶段直接失败（v1.0.4 Release 的 ubuntu job 就是这么挂的：
+// Property '$1' specifies file 'vlc-3.0.21.jar' which doesn't exist，optional() 也拦不住）。
+// 本任务没有 outputs，本来每次都会执行，用 inputs 换不来 up-to-date，只留 path 记录便于排查。
 val verifyVlcArchive by tasks.registering {
     notCompatibleWithConfigurationCache("自定义任务在 doLast 中引用 Gradle script 对象")
     group = "compose desktop"
     description = "Verify the libvlc archive SHA-256 before it is bundled (P2-25)"
     dependsOn("prepareAppResources")
-    val archive = vlcSetupCacheDir.resolve(vlcArchiveName)
     val expected = vlcExpectedSha256
-    inputs.file(archive).optional()
     inputs.property("expectedSha256", expected ?: "<none>")
+    inputs.property("vlcArchiveName", vlcArchiveName)
     doLast {
-        if (!archive.isFile) {
-            logger.warn("P2-25: 未找到 libvlc 归档 $archive，跳过 SHA-256 校验（本次打包可能复用了已解压产物）。")
+        val archive = cachedVlcArchive()
+        if (archive == null) {
+            logger.warn(
+                "P2-25: 在 $vlcSetupCacheDir 未找到 libvlc 归档，跳过 SHA-256 校验" +
+                    "（本次打包可能复用了已解压产物）。"
+            )
             return@doLast
         }
         if (expected == null) {
             logger.warn(
-                "P2-25: $vlcArchiveName 未配置 SHA-256，本次未校验归档完整性。" +
+                "P2-25: ${archive.name} 未配置 SHA-256，本次未校验归档完整性。" +
                     "联网下载存在被篡改 / 截断风险；可用 -PvlcArchiveSha256=<sha256> 注入期望值，" +
                     "或把归档与其 SHA 登记到 third-party/binaries/SOURCE.txt。"
             )
@@ -465,7 +493,7 @@ val verifyVlcArchive by tasks.registering {
         check(actual.equals(expected, ignoreCase = true)) {
             "libvlc 归档 SHA-256 不匹配：$archive 期望 $expected，实际 $actual。请重新获取该文件。"
         }
-        logger.lifecycle("P2-25: $vlcArchiveName SHA-256 校验通过")
+        logger.lifecycle("P2-25: ${archive.name} SHA-256 校验通过")
     }
 }
 

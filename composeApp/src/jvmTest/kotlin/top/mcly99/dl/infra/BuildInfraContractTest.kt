@@ -99,6 +99,13 @@ class BuildInfraContractTest {
         assertTrue(build.contains("本次未校验"), "无 SHA 时必须明确告警，不能静默跳过")
         // 只有 macOS dmg 有内置值，不能给 Windows/Linux 编一个未知 SHA
         assertTrue(build.contains("else -> null"), "bundledVlcSha256 的非 macOS 分支应保持 null")
+        // 回归防线（v1.0.4 Release 的 ubuntu job 就死在这里）：归档路径不能声明成
+        // inputs.file —— Linux 上插件的落盘名与 vlcBundleVersion 无关（硬编 3.0.20-2），
+        // 声明成输入会在配置校验阶段直接失败，且 optional() 也拦不住。
+        assertFalse(build.contains("inputs.file(archive)"),
+            "归档不能声明为任务输入：Linux 上文件名与 vlcBundleVersion 不一致会直接让构建失败")
+        assertTrue(build.contains("fun cachedVlcArchive()"),
+            "三平台归档落地名必须由 cachedVlcArchive() 统一解析")
     }
 
     @Test
