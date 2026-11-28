@@ -48,11 +48,19 @@ internal class SlowConnectionDetector(
         val writeWaitRatio: Double,
         /** 这个段已经被剔除过几次 */
         val shedCount: Int,
+        /**
+         * 最近一两秒内**任意**一条连接被磁盘卡住过（≥ 50 ms）。
+         *
+         * 单看自己的 writeWaitRatio 不够：8 条连接里只有一条正在写的时候它占比很高，
+         * 其余 7 条看起来「网络慢」。慢盘是所有连接共享的瓶颈，必须用全局广播来豁免。
+         */
+        val diskRecentlyStalled: Boolean = false,
     )
 
     fun shouldShed(sample: Sample): Boolean {
         if (sample.elapsedMs < graceMs) return false
         if (sample.shedCount >= maxShedPerSegment) return false
+        if (sample.diskRecentlyStalled) return false
         if (sample.writeWaitRatio >= diskBoundRatio) return false
 
         val rate = sample.bytesReceived * 1000L / sample.elapsedMs.coerceAtLeast(1L)

@@ -45,6 +45,20 @@ internal object SegmentTuning {
 
     /** 慢连接判定的检查间隔；太密会把瞬时抖动当成掉速，太疏则剔除滞后 */
     const val SHED_CHECK_INTERVAL_MS = 500L
+
+    /** 每个源最多试几轮：首次立即重试，之后指数退避（H 项） */
+    const val RETRY_ROUNDS_PER_SOURCE = 3
+
+    /** 主机连接上限的重规划次数上限：防止「被拒 → 重规划 → 又被拒」转不出来 */
+    const val MAX_CONNECTION_REPLANS = 4
+
+    /**
+     * 判定「磁盘卡住」的单次写耗时阈值。
+     *
+     * 正常页缓存写入是微秒级；超过 50 ms 说明真的在等盘（机械盘寻道、U 盘、网络盘），
+     * 此时所有连接的速度都会掉，剔除任何一条都是误杀。
+     */
+    const val DISK_STALL_THRESHOLD_NANOS = 50L * 1_000_000
 }
 
 /**

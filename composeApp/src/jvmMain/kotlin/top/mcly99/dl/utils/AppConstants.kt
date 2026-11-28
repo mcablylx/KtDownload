@@ -53,10 +53,18 @@ object AppConstants {
     const val CONNECT_TIMEOUT_MS = 15_000
     const val READ_TIMEOUT_MS = 30_000
     const val SINGLE_BUFFER_SIZE = 1024 * 1024
-    const val CHUNK_BUFFER_SIZE = 1024 * 1024
-    const val MERGE_BUFFER_SIZE = 1024 * 1024
+
+    /**
+     * 分块读缓冲。
+     *
+     * 从 1 MiB 降到 256 KiB（F 项）：这个值直接决定「慢盘时最多压住多少未落盘数据」。
+     * 64 条连接 × 1 MiB = 64 MiB 的脏数据排队等一个盘，慢盘上一次 flush 就能让整队列
+     * 排到几秒之后；改成 256 KiB 后同样的连接数只压 16 MiB，而且写盘统一走单线程，
+     * 网络读取不再被某个连接的 flush 直接挡住。
+     */
+    const val CHUNK_BUFFER_SIZE = 256 * 1024
+
     const val IO_POLL_MS = 300L
-    const val OFFSET_FLUSH_MS = 1_000L
     const val PROGRESS_PUBLISH_INTERVAL_MS = 200L
     const val MAX_THREADS = 64
     const val TASK_PERSIST_DEBOUNCE_MS = 2_000L

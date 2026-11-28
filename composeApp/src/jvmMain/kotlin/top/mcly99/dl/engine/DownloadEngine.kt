@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -95,6 +96,22 @@ class DownloadEngine(
      * 这里用独立的 SupervisorJob，只有 [shutdown] 在 join 完成后才取消它。
      */
     private val cleanupScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * 写盘专用调度器：**并发度为 1**（F 项）。
+     *
+     * 所有连接的分块写都提交到这里串行执行。不是为了「省线程」，而是为了两件事：
+     * 1. NTFS 上一次 flush 会挂住该文件的所有写，多个线程同时写同一个句柄只会互相拖垮；
+     * 2. 串行之后，某条连接在等盘时，其它连接仍能在自己的线程上读网络（各自持有缓冲），
+     *    「盘慢」表现为整体变慢，而不是所有连接一起断速。
+     */
+    private val diskDispatcher = Dispatchers.IO.limitedParallelism(1)
+
+    /** 写盘耗时统计：给慢连接判据提供「是不是盘在拖后腿」的证据（F 项） */
+    private val writeStats = WriteStats(SegmentTuning.DISK_STALL_THRESHOLD_NANOS)
+
+    /** 主机连接上限学习表（E 项）：进程级共享，同一网盘不同任务能互相对照 */
+    private val hostCaps = HostCapRegistry()
 
     /** 任务表：写操作统一由 [stateLock] 保护 */
     private val taskMap = ConcurrentHashMap<String, DownloadTask>()
@@ -683,8 +700,20 @@ class DownloadEngine(
                 return
             }
 
-            if (totalSize < multiThreadThresholdBytes || !supportsRangeRequests(task.url, task.auth())) {
+            // 小文件本来就走单线程，连「支不支持分段」都不必问：懒求值，
+            // 否则每次小文件下载都白多一个 Range 请求（这个断言在集成测试里钉死）
+            if (totalSize < multiThreadThresholdBytes) {
                 AppLogger.debug("DownloadEngine", "单线程下载: ${task.fileName} ($totalSize bytes)")
+                downloadSingleThread(taskId, current, restart = restart)
+                complete(taskId, totalSize)
+                return
+            }
+
+            // 探测里已经发过 `Range: bytes=0-0` 就直接用那个结论：再发一遍是纯粹重复的
+            // 一个 RTT + 一次建连（旧实现最多 3 个请求定方案，现在最多 2 个）。
+            val canRange = probe.rangeSupported ?: supportsRangeRequests(task.url, task.auth())
+            if (!canRange) {
+                AppLogger.debug("DownloadEngine", "服务端不支持分段，单线程下载: ${task.fileName}")
                 downloadSingleThread(taskId, current, restart = restart)
                 complete(taskId, totalSize)
                 return
@@ -1043,12 +1072,21 @@ class DownloadEngine(
         if (rateLimiter.enabled) ThrottledInputStream(input, rateLimiter, isActive) else input
 
     /**
-     * 远端探测结果：总大小 + 内容指纹。
+     * 远端探测结果：总大小 + 内容指纹 + **是否支持 Range**。
      *
-     * 两件事必须在**同一次**探测里拿到：大小决定分片规划，指纹决定「规划里的这份是不是同一份」。
-     * 分开探测会多一次往返，而且两次响应之间远端仍可能变化，拿到的组合自相矛盾。
+     * 三件事尽量在**同一次**探测里拿到：大小决定分片规划，指纹决定「规划里的这份是不是同一份」，
+     * Range 支持决定走多连接还是单连接。分开探测不仅多一次往返，而且几次响应之间远端仍可能
+     * 变化，拿到的组合自相矛盾。
+     *
+     * [rangeSupported] 为 null 表示这次探测没发过带 Range 的请求（只发了 HEAD），
+     * 调用方仍需自行判断；非 null 时就是 `Range: bytes=0-0` 那一次的真实结论，
+     * 不能再发一遍 —— 这正是「首包即探测」要省掉的那个重复 RTT。
      */
-    private data class RemoteProbe(val size: Long, val fingerprint: ContentFingerprint)
+    private data class RemoteProbe(
+        val size: Long,
+        val fingerprint: ContentFingerprint,
+        val rangeSupported: Boolean? = null,
+    )
 
     /**
      * 探测远端：总大小与内容指纹。
@@ -1074,7 +1112,11 @@ class DownloadEngine(
                 ranged == null -> head ?: RemoteProbe(-1L, ContentFingerprint.UNKNOWN)
                 head == null -> ranged
                 // HEAD 只给了指纹没给长度：长度用 Range 的，指纹谁有就用谁的
-                else -> RemoteProbe(ranged.size, ranged.fingerprint.takeIf { it.isKnown } ?: head.fingerprint)
+                else -> RemoteProbe(
+                    ranged.size,
+                    ranged.fingerprint.takeIf { it.isKnown } ?: head.fingerprint,
+                    ranged.rangeSupported,
+                )
             }
         }
 
@@ -1097,6 +1139,7 @@ class DownloadEngine(
                 ranged?.fingerprint?.takeIf { it.isKnown }
                     ?: head?.fingerprint?.takeIf { it.isKnown }
                     ?: ContentFingerprint.UNKNOWN,
+                ranged?.rangeSupported,
             )
         }
 
@@ -1110,13 +1153,18 @@ class DownloadEngine(
             rangedSize == knownSize -> RemoteProbe(
                 knownSize,
                 rangedFingerprint.takeIf { it.isKnown } ?: headFingerprint,
+                ranged.rangeSupported,
             )
             headSize != null && headSize == rangedSize -> {
                 AppLogger.info(
                     "DownloadEngine",
                     "HEAD 与 Range 均报告远端长度为 $headSize（入队时为 $knownSize），按远端新长度下载: ${task.fileName}",
                 )
-                RemoteProbe(headSize, headFingerprint.takeIf { it.isKnown } ?: rangedFingerprint)
+                RemoteProbe(
+                    headSize,
+                    headFingerprint.takeIf { it.isKnown } ?: rangedFingerprint,
+                    ranged.rangeSupported,
+                )
             }
             else -> {
                 if (headSize != null || rangedSize != null) {
@@ -1126,8 +1174,9 @@ class DownloadEngine(
                             "保留入队值，避免错误页覆盖真实大小: ${task.fileName}",
                     )
                 }
-                // 长度可疑时指纹也多半来自同一张错误页，不能拿它判「内容已变」
-                RemoteProbe(knownSize, ContentFingerprint.UNKNOWN)
+                // 长度可疑时指纹也多半来自同一张错误页，不能拿它判「内容已变」；
+                // 但 Range 支持与否是协议层结论，与内容真伪无关，可以放心沿用
+                RemoteProbe(knownSize, ContentFingerprint.UNKNOWN, ranged?.rangeSupported)
             }
         }
     }
@@ -1167,7 +1216,11 @@ class DownloadEngine(
                 code == HttpURLConnection.HTTP_OK -> connection.contentLengthLong
                 else -> -1L
             }
-            if (size <= 0 && !fingerprint.isKnown) null else RemoteProbe(size, fingerprint)
+            // 请求本身就是 `Range: bytes=0-0`：回 206 就说明支持分段，回 200 就是不支持。
+            // 这个结论顺手带走，调用方不必再发一次同样的请求（「首包即探测」）。
+            val rangeSupported = code == HttpURLConnection.HTTP_PARTIAL
+            if (size <= 0 && !fingerprint.isKnown) null
+            else RemoteProbe(size, fingerprint, rangeSupported)
         } catch (e: Exception) {
             AppLogger.debug("DownloadEngine", "Range 探测失败: ${e.message}")
             null
@@ -1600,8 +1653,11 @@ class DownloadEngine(
     /**
      * 拉起 worker 池跑完段表。
      *
-     * worker 数 = `min(线程数, 剩余段数)`：线程数在这里的语义是**连接上限**，
-     * 不是分片数。段被动态切分后段数会超过 worker 数，正是「快的连接多干活」的实现方式。
+     * 两层结构：
+     * - **外层按主机上限重规划**（E 项）：服务器只允许 2 条连接时，多余的 worker 被拒后
+     *   自行退出、段回池，外层用学到的上限重新拉起更少的 worker，任务继续跑而不是整任务报错。
+     * - **worker 数 = min(线程数, 学到的主机上限, 剩余段数)**：线程数是用户意图，
+     *   主机上限是服务端事实，段数是工作量。
      */
     private suspend fun downloadSegments(
         taskId: String,
@@ -1613,18 +1669,22 @@ class DownloadEngine(
         ifRange: String?,
         threads: Int,
     ) {
-        val workerCount = minOf(threads, table.pendingCount).coerceAtLeast(1)
+        val host = hostKeyOf(sources.first().first)
         // 整条链路一个采样器：各连接各算各的会得到 N 个互不相干的瞬时值
         val linkSampler = ByteRateSampler()
         val bestConnectionRate = AtomicLong(0L)
         val activeWorkers = AtomicInteger(0)
+        // 「正在收数据」的连接数：学主机上限时要的是这个，而不是「已启动的 worker 数」。
+        // 被拒的连接也算在 activeWorkers 里但不在这个计数里，用它当观测值会永远学不出上限。
+        val receivingConnections = AtomicInteger(0)
         val lastPersistAt = AtomicLong(0L)
 
         suspend fun persistSnapshot() {
             // 先把脏页刷出去，再写快照：快照里的游标必须对应「确实在盘上」的字节。
             // 顺序反过来，掉电后续传会从空洞中间接着写，交付一份长度正确、内容错位的文件
             // （追加写模型有 part.length() 兜底，单文件偏移写没有这个信号，只能靠这道顺序）。
-            runCatching { channel.force(false) }
+            // force 与 write 共用单写线程：同一句柄上两种落盘节奏串行，不会互相插队。
+            withContext(diskDispatcher) { runCatching { channel.force(false) } }
             store.save(table)
         }
 
@@ -1637,7 +1697,7 @@ class DownloadEngine(
             persistSnapshot()
         }
 
-        try {
+        suspend fun runWorkerPool(workerCount: Int) {
             coroutineScope {
                 repeat(workerCount) { workerId ->
                     launch {
@@ -1649,7 +1709,8 @@ class DownloadEngine(
                                 try {
                                     downloadSegment(
                                         taskId, workerId, sources, segment, channel, table,
-                                        totalSize, ifRange, linkSampler, bestConnectionRate, activeWorkers,
+                                        totalSize, ifRange, linkSampler, bestConnectionRate,
+                                        activeWorkers, receivingConnections,
                                     )
                                     table.release(segment)
                                 } catch (e: SlowConnectionShed) {
@@ -1662,6 +1723,17 @@ class DownloadEngine(
                                             "（第 ${segment.shedCount} 次）",
                                     )
                                     continue
+                                } catch (e: ConcurrencyRejected) {
+                                    // 不是失败：主机限制并发。段回池、本连接退出，等外层按新上限重规划
+                                    table.abandon(segment)
+                                    val learned = hostCaps.observeRejection(e.host, e.observedCap)
+                                    AppLogger.info(
+                                        "DownloadEngine",
+                                        "主机限并发（HTTP ${e.status}，当时 ${e.receivingConnections} 条在收数据）" +
+                                            (learned?.let { "，上限记为 $it" } ?: "，待更多观测") +
+                                            ": $host",
+                                    )
+                                    break
                                 }
                                 lastEnd = segment.end
                                 persistIfDue()
@@ -1672,19 +1744,68 @@ class DownloadEngine(
                     }
                 }
             }
+        }
+
+        try {
+            var replans = 0
+            while (!table.isComplete()) {
+                val cap = hostCaps.capFor(host)
+                val planned = minOf(threads, cap ?: threads, table.pendingCount).coerceAtLeast(1)
+                if (replans > 0) {
+                    AppLogger.info(
+                        "DownloadEngine",
+                        "按主机上限重规划：$planned 条连接（学到 ${cap ?: "未知"}，剩余 ${table.pendingCount} 段）: $host",
+                    )
+                }
+                val before = table.totalDone()
+                runWorkerPool(planned)
+                if (table.isComplete()) break
+
+                // 两种情况都值得再来一轮：
+                // 1. 有字节进展（上限可能刚被学到，剩下的段交给更少的连接）；
+                // 2. 一个字节都没动，但上限刚变小 —— 并发请求一起到达时可能全部被拒，
+                //    这一轮本来就下不了任何东西，缩容后的下一轮才是真正能跑的那轮。
+                val learnedNow = hostCaps.capFor(host)
+                val capShrank = learnedNow != null && learnedNow < planned
+                if (table.totalDone() > before || capShrank) {
+                    if (++replans > SegmentTuning.MAX_CONNECTION_REPLANS) {
+                        throw IllegalStateException(
+                            "连接上限重规划次数过多，仍有 ${table.pendingCount} 段未完成",
+                        )
+                    }
+                    continue
+                }
+                throw IllegalStateException(
+                    "所有连接都被拒绝或失败，仍有 ${table.pendingCount} 段未完成" +
+                        (cap?.let { "（主机上限 $it）" } ?: ""),
+                )
+            }
         } finally {
             // 暂停/取消/失败时也必须落一次：旧实现靠 persistChunkOffset 保证「每次暂停不丢进度」，
             // 只靠周期性快照的话，暂停前那几百毫秒就白下了 —— 续传要从更早的位置重来。
             // 这里先 force 再写，保证快照里的游标不会领先于真正落盘的字节。
-            runCatching { channel.force(false) }
-            store.save(table)
+            //
+            // **必须 NonCancellable**：暂停/取消时本协程已经是取消状态，
+            // `withContext(diskDispatcher)` 一进去就会抛 CancellationException，
+            // 快照直接丢掉 —— 现象就是「暂停后继续，进度从 0 重来」。
+            withContext(NonCancellable + diskDispatcher) {
+                runCatching { channel.force(false) }
+                store.save(table)
+            }
         }
     }
 
     /**
-     * 下一段活：先按源顺序轮转，任一段失败即换下一个源，全部失败才抛。
+     * 下一段活：多源轮转 + 每个源多轮重试（H 项）。
      *
-     * 与旧实现的区别只在「段从哪来」——多源轮转、ContentReplaced 直抛、失败换源的语义都保留。
+     * 旧实现每个源只试一次：单源任务遇一次瞬时 500 / 连接重置，整任务就红，用户得手动点「继续」。
+     * 现在按「首次立即、之后指数退避」重试 [SegmentTuning.RETRY_ROUNDS_PER_SOURCE] 轮，
+     * 且**不重置已落盘字节** —— 游标跟着段走，重试天然从断点继续。
+     *
+     * 三条不重试的红线：
+     * - `ContentReplacedException`：远端换了内容，重试只会读到另一份文件的字节；
+     * - `CancellationException` / `SlowConnectionShed` / `ConcurrencyRejected`：控制流，不是失败；
+     * - 4xx（除 408/429）：直链过期、404、416 这类重试再多次也一样，试完所有源就抛。
      */
     private suspend fun downloadSegment(
         taskId: String,
@@ -1698,6 +1819,7 @@ class DownloadEngine(
         linkSampler: ByteRateSampler,
         bestConnectionRate: AtomicLong,
         activeWorkers: AtomicInteger,
+        receivingConnections: AtomicInteger,
     ) {
         if (segment.finished) return
         // 按段起点取模，稳定地把不同段分散到不同源；单源任务恒为 0，行为与改动前一致。
@@ -1706,15 +1828,18 @@ class DownloadEngine(
         val seed = ((segment.start / segmentBytes.coerceAtLeast(1L)) % sources.size).toInt()
         // 跨源长度校验只在真的多源时做（单源任务保持原行为）
         val expectedTotal = if (sources.size > 1) totalSize else -1L
+        val totalAttempts = sources.size * SegmentTuning.RETRY_ROUNDS_PER_SOURCE
+        var failures = 0
         var lastError: Exception? = null
 
-        for (attempt in sources.indices) {
+        while (failures < totalAttempts) {
             currentCoroutineContext().ensureActive()
-            val (url, auth) = sources[(seed + attempt) % sources.size]
+            val (url, auth) = sources[(seed + failures) % sources.size]
             try {
                 transferSegment(
                     taskId, workerId, url, auth, segment, channel, table,
-                    expectedTotal, ifRange, linkSampler, bestConnectionRate, activeWorkers,
+                    expectedTotal, ifRange, linkSampler, bestConnectionRate,
+                    activeWorkers, receivingConnections,
                 )
                 if (!segment.finished) {
                     throw IllegalStateException(
@@ -1725,18 +1850,28 @@ class DownloadEngine(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: ContentReplacedException) {
-                // 内容变了，换源没有意义：立刻终止整轮
+                // 内容变了，换源重试没有意义：立刻终止整轮
                 throw e
             } catch (e: SlowConnectionShed) {
                 throw e
+            } catch (e: ConcurrencyRejected) {
+                throw e
             } catch (e: Exception) {
                 lastError = e
-                if (sources.size > 1) {
-                    AppLogger.warn(
-                        "DownloadEngine",
-                        "段 ${segment.start} 第 ${attempt + 1}/${sources.size} 个源失败，尝试下一源: ${e.message}",
-                    )
-                }
+                failures++
+                val retryable = isRetryableSegmentFailure(e)
+                // 不可重试的错误至少把所有源都试一遍（可能是这个源过期了，另一个还好），
+                // 全试完就立刻抛，不要按轮次空耗
+                if (!retryable && failures >= sources.size) throw e
+                if (failures >= totalAttempts) break
+                val waitMs = if (retryable) retryBackoffMs(failures) else 0L
+                AppLogger.warn(
+                    "DownloadEngine",
+                    "段 ${segment.start} 第 $failures 次失败" +
+                        (if (waitMs > 0) "，${waitMs} ms 后重试" else "，立即换源重试") +
+                        ": ${e.message}",
+                )
+                if (waitMs > 0) delay(waitMs)
             }
         }
         throw lastError ?: IllegalStateException("段 ${segment.start} 没有可用下载源")
@@ -1762,6 +1897,7 @@ class DownloadEngine(
         linkSampler: ByteRateSampler,
         bestConnectionRate: AtomicLong,
         activeWorkers: AtomicInteger,
+        receivingConnections: AtomicInteger,
     ) {
         if (segment.finished) return
         val connStart = segment.cursor
@@ -1782,6 +1918,8 @@ class DownloadEngine(
         var writeNanos = 0L
         var lastShedCheck = startedAt
         var lastEmit = 0L
+        /** 是否已经计入「正在收数据」的连接数：只有真正进到读循环才计，退出时按此归还 */
+        var receiving = false
 
         try {
             connection.connect()
@@ -1794,11 +1932,29 @@ class DownloadEngine(
                         "段 ${segment.start} 收到 HTTP 200：If-Range 判定远端内容已变化",
                     )
                 }
-                throw IllegalStateException("段请求失败: HTTP $code")
+                // 没带 If-Range 却回 200：服务端忽略了 Range。重试不会变好，直接交给上层换源/失败
+                throw SegmentHttpException(code, "段请求失败: HTTP $code（服务端忽略了 Range）")
             }
             if (code != HttpURLConnection.HTTP_PARTIAL) {
                 runCatching { connection.disconnect() }
-                throw IllegalStateException("段请求失败: HTTP $code")
+                // 403 / 429 / 503 有两种完全不同的成因：直链过期（重试无用）与并发超限
+                // （少开几条就好）。靠「当时还有别的连接在工作吗」来分：有，就先当作并发，
+                // 让外层按学到的上限重规划；只有它一条还失败，那才是鉴权/过期，记下来
+                // 以后不再把这个 host 的失败当并发信号（E 项）。
+                if (isConcurrencyStatus(code)) {
+                    val host = hostKeyOf(url)
+                    val active = activeWorkers.get()
+                    val receivingNow = receivingConnections.get()
+                    if (active >= 2) {
+                        // 观测值取「正在收数据的连接数」：它们证明了自己能工作。
+                        // 一条都没收到首字节就被拒（并发请求同时到达）时退一步记「尝试数 − 1」，
+                        // 保证每轮至少缩一条连接，能收敛。
+                        val observed = if (receivingNow > 0) receivingNow else (active - 1).coerceAtLeast(1)
+                        throw ConcurrencyRejected(host, observed, receivingNow, code)
+                    }
+                    hostCaps.noteSingleConnectionFailure(host)
+                }
+                throw SegmentHttpException(code, "段请求失败: HTTP $code")
             }
             // 206 只说明「接受了 Range」，不说明「从我要的位置开始」：
             // 忽略 If-Range / 截断区间的服务器照样回 206，把那批字节写进去就是静默错位
@@ -1818,6 +1974,10 @@ class DownloadEngine(
                     )
                 }
             }
+
+            // 从这里起算「正在收数据」：主机上限学习拿这个数当「能同时工作的条数」的证据
+            receivingConnections.incrementAndGet()
+            receiving = true
 
             val selfJob = currentCoroutineContext()[Job]
             limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
@@ -1839,14 +1999,20 @@ class DownloadEngine(
                     buffer.limit(toWrite)
                     var written = 0
                     while (buffer.hasRemaining()) {
-                        // 绝对定位写：多个 worker 写同一个文件互不干扰，也不动 channel 的 position
-                        val w = channel.write(buffer, segment.cursor)
+                        // 绝对定位写：多个 worker 写同一个文件互不干扰，也不动 channel 的 position。
+                        // 统一提交到单写线程（F 项）：盘慢时排队只发生在写这一侧，
+                        // 别的连接还能继续读网络，不会「一条在 flush、八条全断速」。
+                        val at = segment.cursor
+                        val w = withContext(diskDispatcher) { channel.write(buffer, at) }
                         if (w <= 0) throw IllegalStateException("写入磁盘失败")
                         segment.cursor += w
                         table.addBytes(w.toLong())
                         written += w
                     }
-                    writeNanos += System.nanoTime() - writeStartedAt
+                    val elapsedWrite = System.nanoTime() - writeStartedAt
+                    writeNanos += elapsedWrite
+                    // 全局写耗时：慢连接判据靠它区分「网络慢」与「盘慢」（后者不该剔除）
+                    writeStats.record(elapsedWrite)
                     bytesThisConnection += written
 
                     val now = System.currentTimeMillis()
@@ -1869,14 +2035,16 @@ class DownloadEngine(
                             linkBytesPerSec = linkSampler.sample(table.totalDone(), now),
                             activeConnections = activeWorkers.get(),
                             bestConnectionBytesPerSec = bestConnectionRate.get(),
-                            writeWaitRatio = writeNanos.toDouble() / (elapsed * 1_000_000.0),
+                            writeWaitRatio = writeStats.ratioFor(writeNanos, elapsed),
                             shedCount = segment.shedCount,
+                            diskRecentlyStalled = writeStats.stalledRecently(now),
                         )
                         if (detector.shouldShed(sample)) throw SlowConnectionShed()
                     }
                 }
             }
         } finally {
+            if (receiving) receivingConnections.decrementAndGet()
             taskConnections.remove(key)
             ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
         }
