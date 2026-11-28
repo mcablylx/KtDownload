@@ -56,6 +56,7 @@ import java.nio.file.StandardOpenOption
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -67,14 +68,21 @@ import java.util.concurrent.atomic.AtomicLong
  * - **状态机**：所有状态迁移经 [DownloadTaskStateMachine]。
  * - **调度**：`activeJobs` 的「检查—启动—登记」由 [dispatchLock] 串行化。
  * - **可中断**：保存 [HttpURLConnection] / [FileChannel] 引用，暂停/取消时立即断开。
- * - **断点续传**：分块模式使用 `name.partN` + `name.partN.offset`。
- * - **IO**：单文件与分片用 [FileChannel] + 1MB 缓冲；合并用 `transferTo`。
+ * - **断点续传**：多线程模式用单文件 `name.part` + 段表快照 `name.segments`。
+ * - **IO**：各连接按绝对偏移写同一个文件，完成即改名，没有合并步骤。
  */
 class DownloadEngine(
     /** 测试可关闭任务持久化，避免集成测试污染用户的 `~/.mclydownload/tasks.properties` */
     private val taskPersistenceEnabled: Boolean = true,
     /** 多线程阈值可注入；生产使用 [AppConstants.MULTI_THREAD_THRESHOLD_BYTES] */
     private val multiThreadThresholdBytes: Long = AppConstants.MULTI_THREAD_THRESHOLD_BYTES,
+    /**
+     * 初始分段粒度可注入。
+     *
+     * 生产取 4 MiB：12 MiB 的文件只切 3 段，不会被 64 线程设置切成 64 片 × 187 KiB。
+     * 测试用小值（64 KiB）才能在几 MB 的样本上验证「多段并行 + 切分 + 续传」的真实行为。
+     */
+    private val segmentBytes: Long = SegmentTuning.MIN_SEGMENT_BYTES,
 ) : DownloadOperations {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -287,9 +295,6 @@ class DownloadEngine(
         /** 416 Range Not Satisfiable；HttpURLConnection 没有对应常量 */
         private const val HTTP_RANGE_NOT_SATISFIABLE = 416
 
-        /** 分块临时文件名 */
-        fun partFile(target: File, index: Int): File = File(target.parentFile, "${target.name}.part$index")
-
         /**
          * 下载过程中发现远端内容变了时，允许的**重下一次**的次数。
          *
@@ -297,9 +302,6 @@ class DownloadEngine(
          * 真的变了说明文件正在被持续写入，无限重试只会白烧带宽。
          */
         private const val MAX_CONTENT_RESTARTS = 1
-
-        /** 分块进度文件名（记录已落盘字节数） */
-        fun offsetFile(target: File, index: Int): File = File(target.parentFile, "${target.name}.part$index.offset")
     }
 
     // ------------------------------------------------------------------ 任务管理
@@ -688,7 +690,7 @@ class DownloadEngine(
                 return
             }
 
-            val threadCount = buildChunkRanges(totalSize, task.threads).size
+            val threadCount = minOf(task.threads, initialSegmentCount(totalSize, task.threads, segmentBytes))
             AppLogger.debug("DownloadEngine", "多线程下载 x$threadCount: ${task.fileName} ($totalSize bytes)")
             downloadMultiThread(taskId, current, totalSize)
             complete(taskId, totalSize)
@@ -1192,7 +1194,7 @@ class DownloadEngine(
     private fun hasLocalBytes(task: DownloadTask): Boolean {
         val file = task.savePath.toFile()
         if (file.exists() && file.length() > 0) return true
-        return (0 until AppConstants.MAX_THREADS).any { partFile(file, it).exists() }
+        return partialDownloadFile(file).exists()
     }
 
     /**
@@ -1231,7 +1233,7 @@ class DownloadEngine(
             "远端内容已变化（旧 ${stored.describe()} / 新 ${probed.describe()}），" +
                 "丢弃已下载数据重下: ${task.fileName}",
         )
-        discardChunkParts(task.savePath.toFile())
+        cleanupDownloadArtifacts(task.savePath.toFile())
         // force：downloadedSize 归零必须落盘，否则重启后 UI 还显示旧的进度
         updateTask(taskId, downloadedSize = 0L, fingerprint = probed, force = true)
         return true
@@ -1268,9 +1270,11 @@ class DownloadEngine(
         restart: Boolean = false,
     ) = withContext(Dispatchers.IO) {
         val file = task.savePath.toFile()
-        // 线程数改到 1 / 服务端不再支持 Range 时，旧的多线程分片已经用不上，
+        // 线程数改到 1 / 服务端不再支持 Range 时，旧的多线程中间产物已经用不上，
         // 留着既占空间又会误导下次续传，直接清掉。
-        if (chunkPlanFile(file).exists()) discardChunkParts(file)
+        if (segmentPlanFile(file).exists() || partialDownloadFile(file).exists()) {
+            cleanupDownloadArtifacts(file)
+        }
         var startByte = when {
             restart -> 0L
             file.exists() -> file.length()
@@ -1475,52 +1479,82 @@ class DownloadEngine(
     }
 
     /**
-     * 多线程分块下载（支持断点续传）。
+     * 多线程下载：**一个 `.part` 文件 + 一张可切分的段表**。
      *
-     * 全部分片完成后进入 [DownloadStatus.MERGING]，再合并为最终文件。
+     * 与旧模型的三处差别：
+     * - 不再有 N 个 `.partN` 与最后的合并步骤：各连接按绝对偏移写同一个文件，完成即改名。
+     *   省掉一整遍读写、峰值磁盘占用减半、也不会卡在 `MERGING` 99%。
+     * - 段不再是「一次切死」的静态区间：先下完的连接会去切剩余最多的那段（[SegmentTable]），
+     *   总耗时从 `max(各片)` 靠近 `avg(各片)`。
+     * - 连接明显慢于基准时会被踢掉重连（[SlowConnectionDetector]），而不是拖着整任务走完。
+     *
+     * 断点续传靠 `.segments` 快照：记录「哪些区间还没下完、各自写到哪」。
+     * 快照不可信（长度或指纹变了、内容损坏、老版本没有）就整份丢弃重下。
      */
-    private suspend fun downloadMultiThread(taskId: String, task: DownloadTask, totalSize: Long) = withContext(Dispatchers.IO) {
+    private suspend fun downloadMultiThread(
+        taskId: String,
+        task: DownloadTask,
+        totalSize: Long,
+    ) = withContext(Dispatchers.IO) {
         val target = task.savePath.toFile()
-        val ranges = buildChunkRanges(totalSize, task.threads)
-        if (ranges.isEmpty()) {
-            throw IllegalStateException("无法为 $totalSize 字节的文件规划分块")
-        }
-        // 计划漂移保护：线程数 / 总长 / 内容指纹与落盘分片不一致时丢弃旧分片，绝不合并错位字节
-        if (!reconcileChunkPlan(target, totalSize, ranges.size, task.threads, task.fingerprint)) {
-            AppLogger.info("DownloadEngine", "分片计划已变更，丢弃旧分片重下: ${target.name}")
-        }
-        // C2：分片规划一个字节都不改（ranges / totalSize / .partN / .offset 全部沿用），
-        // 只把「每片固定的那一对 (url, auth)」换成按 index 轮转的一组源。
-        // 单源任务 sources.size == 1，行为与改动前完全一致（失败一次即抛出，不会重试）。
+        val partial = partialDownloadFile(target)
+        val store = SegmentPlanStore(segmentPlanFile(target))
         val sources = task.downloadSources()
-        var ifRange = task.fingerprint.ifRangeValue
-
-        // P0-2：探测通过之后、分块下到一半时远端仍可能被换掉（网盘覆盖上传是几分钟的事）。
-        // 那一刻 `If-Range` 会让服务端回 200，于是这一轮的分片来自另一份内容 —— 整轮作废重来。
-        // 只重来一次：远端如果一直在变，再重试也只是白烧带宽，不如如实报错。
+        var fingerprint = task.fingerprint
+        var ifRange = fingerprint.ifRangeValue
         var attempt = 0
+
         while (true) {
-            val tracker = DownloadProgressTracker(totalSize, ranges.size)
+            // 偏移写之前必须先按最终长度预留并尽量标稀疏：NTFS 上「扩展后往远处写」
+            // 会同步零填充中间的空洞（2 GiB 偏移写 1 MiB 实测 4.3 s）。
+            SparseFileSupport.prepare(partial, totalSize)
+            val table = openSegmentTable(task, totalSize, fingerprint, store)
+            if (table.resumed) {
+                AppLogger.info(
+                    "DownloadEngine",
+                    "续传：剩余 ${table.pendingCount} 段 / 已完成 ${table.totalDone()}B: ${target.name}",
+                )
+                if (table.totalDone() > 0) updateTask(taskId, downloadedSize = table.totalDone())
+            } else {
+                cleanupLegacyChunkArtifacts(target)
+                AppLogger.info("DownloadEngine", "新建段表 ${table.pendingCount} 段: ${target.name}")
+            }
+
+            val channel = FileChannel.open(partial.toPath(), StandardOpenOption.WRITE)
+            taskFiles.computeIfAbsent(taskId) { CopyOnWriteArrayList() }.add(channel)
             try {
-                downloadAllChunks(taskId, sources, target, ranges, tracker, totalSize, ifRange)
-                // 分片齐全后进入「校验/合并中」，避免 UI 显示 99% 却卡在下载中
+                if (!table.isComplete()) {
+                    downloadSegments(
+                        taskId, sources, channel, table, store, totalSize, ifRange, task.threads,
+                    )
+                }
+                // 段表空了但字节数不够，说明有段被无声跳过：宁可失败，也不交付半份文件
+                if (table.totalDone() != totalSize) {
+                    throw IllegalStateException(
+                        "分段下载结束后字节数不符: ${table.totalDone()} != $totalSize",
+                    )
+                }
+                // 改名之后文件就是成品了，必须先把脏页刷出去
+                runCatching { channel.force(false) }
+                closeQuietly(channel, "DownloadEngine")
+                taskFiles[taskId]?.remove(channel)
+
+                // 状态机语义保留：UI 仍会看到「校验/合并中」，只是这一步现在只剩一次 rename
                 updateTask(taskId, event = DownloadEvent.MERGE)
                 if (getTask(taskId)?.status != DownloadStatus.MERGING) return@withContext
-                mergeChunks(target, ranges.size, totalSize)
+                finishPartial(partial, target, totalSize)
+                store.delete()
                 emitProgress(taskId, totalSize, 0L)
                 return@withContext
             } catch (e: ContentReplacedException) {
-                File(target.parentFile, "${target.name}.merging").delete()
-                discardChunkParts(target)
+                cleanupDownloadArtifacts(target)
                 if (++attempt > MAX_CONTENT_RESTARTS) {
                     throw IllegalStateException(
                         "远端内容在下载过程中反复变化，已放弃：请稍后重试，或确认文件不再被覆盖上传",
                         e,
                     )
                 }
-                // 旧的 If-Range 指向的是「上一份内容」，不清掉的话重试时每一片都会再拿到 200。
-                // 重新探测一次指纹；顺带确认长度没变 —— 长度变了分片规划就作废了，
-                // 那已经超出「同一份文件换了内容」的范围，只能让用户重新开始。
+                // 旧的 If-Range 指向的是上一份内容，不清掉的话重试时每段都会再拿到 200
                 val reprobed = probeRemote(task)
                 if (reprobed.size > 0 && reprobed.size != totalSize) {
                     throw IllegalStateException(
@@ -1528,326 +1562,345 @@ class DownloadEngine(
                         e,
                     )
                 }
-                val nextFingerprint = reprobed.fingerprint.takeIf { it.isKnown } ?: ContentFingerprint.UNKNOWN
-                ifRange = nextFingerprint.ifRangeValue
-                // force：downloadedSize 归零与指纹更换都必须落盘
-                updateTask(taskId, downloadedSize = 0L, fingerprint = nextFingerprint, force = true)
-                // 清单跟着分片一起没了：补写回当前计划，否则下次续传又会被判成「没有清单」
-                reconcileChunkPlan(target, totalSize, ranges.size, task.threads, nextFingerprint)
+                fingerprint = reprobed.fingerprint.takeIf { it.isKnown } ?: ContentFingerprint.UNKNOWN
+                ifRange = fingerprint.ifRangeValue
+                // force：下载量归零与指纹更换都必须落盘
+                updateTask(taskId, downloadedSize = 0L, fingerprint = fingerprint, force = true)
                 AppLogger.warn(
                     "DownloadEngine",
-                    "远端内容在下载过程中变化，丢弃分片重下（第 ${attempt + 1} 次）: ${target.name}",
+                    "远端内容在下载过程中变化，丢弃段表重下（第 ${attempt + 1} 次）: ${target.name}",
                 )
-            } catch (e: Exception) {
-                // 保留已下载分片，便于恢复；仅清理合并临时文件
-                File(target.parentFile, "${target.name}.merging").delete()
-                if (e is CancellationException) for (i in ranges.indices) tracker.discard(i)
-                throw e
-            }
-        }
-    }
-
-    /** 跑完一轮全部分块（任一失败即抛，由调用方决定是换源还是整轮重来） */
-    private suspend fun downloadAllChunks(
-        taskId: String,
-        sources: List<Pair<String, RequestAuth>>,
-        target: File,
-        ranges: List<LongRange>,
-        tracker: DownloadProgressTracker,
-        totalSize: Long,
-        ifRange: String?,
-    ) {
-        coroutineScope {
-            ranges.forEachIndexed { index, range ->
-                launch {
-                    var lastFailure: Exception? = null
-                    for (attempt in sources.indices) {
-                        currentCoroutineContext().ensureActive()
-                        val (sourceUrl, sourceAuth) = sources[(index + attempt) % sources.size]
-                        try {
-                            downloadChunk(
-                                taskId, sourceUrl, sourceAuth, target, index,
-                                range.first, range.last, tracker,
-                                // 只在真的多源时校验：单源任务的行为必须与 C2 之前逐字一致
-                                if (sources.size > 1) totalSize else -1L,
-                                ifRange,
-                            )
-                            return@launch
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: ContentReplacedException) {
-                            // 内容变了，换下一个源也没用：立刻终止整轮
-                            throw e
-                        } catch (e: Exception) {
-                            lastFailure = e
-                            if (sources.size > 1) {
-                                AppLogger.warn(
-                                    "DownloadEngine",
-                                    "分块 $index 第 ${attempt + 1}/${sources.size} 个源失败，尝试下一源: ${e.message}",
-                                )
-                            }
-                        }
-                    }
-                    throw lastFailure ?: IllegalStateException("分块 $index 没有可用下载源")
-                }
+            } finally {
+                closeQuietly(channel, "DownloadEngine")
+                taskFiles[taskId]?.remove(channel)
             }
         }
     }
 
     /**
-     * 下载单个分块，支持从 `.offset` 记录处续传。
+     * 取段表：快照可信就接着下，否则新建。
+     *
+     * 「可信」= 版本、总长、内容指纹、区间自洽性全部通过（见 [SegmentPlanStore.load]）。
+     * 线程数不参与判断：段数不再由线程数决定，用户中途改线程数不该让已有进度作废。
      */
-    private suspend fun downloadChunk(
+    private fun openSegmentTable(
+        task: DownloadTask,
+        totalSize: Long,
+        fingerprint: ContentFingerprint,
+        store: SegmentPlanStore,
+    ): SegmentTable {
+        val restored = store.load(totalSize, fingerprint)
+        if (restored != null) {
+            return SegmentTable(totalSize, fingerprint, restored, resumed = true)
+        }
+        val count = initialSegmentCount(totalSize, task.threads, segmentBytes)
+        return SegmentTable(totalSize, fingerprint, buildSegments(totalSize, count), resumed = false)
+    }
+
+    /**
+     * 拉起 worker 池跑完段表。
+     *
+     * worker 数 = `min(线程数, 剩余段数)`：线程数在这里的语义是**连接上限**，
+     * 不是分片数。段被动态切分后段数会超过 worker 数，正是「快的连接多干活」的实现方式。
+     */
+    private suspend fun downloadSegments(
         taskId: String,
+        sources: List<Pair<String, RequestAuth>>,
+        channel: FileChannel,
+        table: SegmentTable,
+        store: SegmentPlanStore,
+        totalSize: Long,
+        ifRange: String?,
+        threads: Int,
+    ) {
+        val workerCount = minOf(threads, table.pendingCount).coerceAtLeast(1)
+        // 整条链路一个采样器：各连接各算各的会得到 N 个互不相干的瞬时值
+        val linkSampler = ByteRateSampler()
+        val bestConnectionRate = AtomicLong(0L)
+        val activeWorkers = AtomicInteger(0)
+        val lastPersistAt = AtomicLong(0L)
+
+        suspend fun persistSnapshot() {
+            // 先把脏页刷出去，再写快照：快照里的游标必须对应「确实在盘上」的字节。
+            // 顺序反过来，掉电后续传会从空洞中间接着写，交付一份长度正确、内容错位的文件
+            // （追加写模型有 part.length() 兜底，单文件偏移写没有这个信号，只能靠这道顺序）。
+            runCatching { channel.force(false) }
+            store.save(table)
+        }
+
+        suspend fun persistIfDue() {
+            val now = System.currentTimeMillis()
+            val previous = lastPersistAt.get()
+            if (now - previous < SegmentTuning.PERSIST_INTERVAL_MS) return
+            // CAS 抢到的那个 worker 独占这次刷盘，其余继续下
+            if (!lastPersistAt.compareAndSet(previous, now)) return
+            persistSnapshot()
+        }
+
+        try {
+            coroutineScope {
+                repeat(workerCount) { workerId ->
+                    launch {
+                        activeWorkers.incrementAndGet()
+                        try {
+                            var lastEnd = -1L
+                            while (true) {
+                                val segment = table.claim(workerId, lastEnd) ?: break
+                                try {
+                                    downloadSegment(
+                                        taskId, workerId, sources, segment, channel, table,
+                                        totalSize, ifRange, linkSampler, bestConnectionRate, activeWorkers,
+                                    )
+                                    table.release(segment)
+                                } catch (e: SlowConnectionShed) {
+                                    // 段回池：游标保留，下一个（或重建后的）连接从这里接着写
+                                    table.noteShed(segment)
+                                    table.abandon(segment)
+                                    AppLogger.debug(
+                                        "DownloadEngine",
+                                        "连接明显偏慢，重建：段 ${segment.start}-${segment.cursor - 1} " +
+                                            "（第 ${segment.shedCount} 次）",
+                                    )
+                                    continue
+                                }
+                                lastEnd = segment.end
+                                persistIfDue()
+                            }
+                        } finally {
+                            activeWorkers.decrementAndGet()
+                        }
+                    }
+                }
+            }
+        } finally {
+            // 暂停/取消/失败时也必须落一次：旧实现靠 persistChunkOffset 保证「每次暂停不丢进度」，
+            // 只靠周期性快照的话，暂停前那几百毫秒就白下了 —— 续传要从更早的位置重来。
+            // 这里先 force 再写，保证快照里的游标不会领先于真正落盘的字节。
+            runCatching { channel.force(false) }
+            store.save(table)
+        }
+    }
+
+    /**
+     * 下一段活：先按源顺序轮转，任一段失败即换下一个源，全部失败才抛。
+     *
+     * 与旧实现的区别只在「段从哪来」——多源轮转、ContentReplaced 直抛、失败换源的语义都保留。
+     */
+    private suspend fun downloadSegment(
+        taskId: String,
+        workerId: Int,
+        sources: List<Pair<String, RequestAuth>>,
+        segment: DownloadSegment,
+        channel: FileChannel,
+        table: SegmentTable,
+        totalSize: Long,
+        ifRange: String?,
+        linkSampler: ByteRateSampler,
+        bestConnectionRate: AtomicLong,
+        activeWorkers: AtomicInteger,
+    ) {
+        if (segment.finished) return
+        // 按段起点取模，稳定地把不同段分散到不同源；单源任务恒为 0，行为与改动前一致。
+        // 除数必须用**实际分段粒度**而不是固定常量：测试会把粒度注入成 32 KiB，
+        // 用 4 MiB 当除数的话所有段的 seed 都是 0，备选源一条都不会被用到。
+        val seed = ((segment.start / segmentBytes.coerceAtLeast(1L)) % sources.size).toInt()
+        // 跨源长度校验只在真的多源时做（单源任务保持原行为）
+        val expectedTotal = if (sources.size > 1) totalSize else -1L
+        var lastError: Exception? = null
+
+        for (attempt in sources.indices) {
+            currentCoroutineContext().ensureActive()
+            val (url, auth) = sources[(seed + attempt) % sources.size]
+            try {
+                transferSegment(
+                    taskId, workerId, url, auth, segment, channel, table,
+                    expectedTotal, ifRange, linkSampler, bestConnectionRate, activeWorkers,
+                )
+                if (!segment.finished) {
+                    throw IllegalStateException(
+                        "段 ${segment.start}-${segment.end} 未写完: cursor=${segment.cursor}",
+                    )
+                }
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ContentReplacedException) {
+                // 内容变了，换源没有意义：立刻终止整轮
+                throw e
+            } catch (e: SlowConnectionShed) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (sources.size > 1) {
+                    AppLogger.warn(
+                        "DownloadEngine",
+                        "段 ${segment.start} 第 ${attempt + 1}/${sources.size} 个源失败，尝试下一源: ${e.message}",
+                    )
+                }
+            }
+        }
+        throw lastError ?: IllegalStateException("段 ${segment.start} 没有可用下载源")
+    }
+
+    /**
+     * 跑一条连接：从段的游标处请求到段的终点，按绝对偏移写入同一个文件。
+     *
+     * 段可能在传输途中被别的 worker 切走（`segment.end` 被调小），因此每读一块都要
+     * 重新判断还能写多少；超出新终点的字节直接丢弃，由拿到新段的那条连接重新请求。
+     */
+    private suspend fun transferSegment(
+        taskId: String,
+        workerId: Int,
         url: String,
         auth: RequestAuth,
-        target: File,
-        index: Int,
-        rangeStart: Long,
-        rangeEnd: Long,
-        tracker: DownloadProgressTracker,
-        /** C2：跨源长度校验用的总长；<= 0 表示不做（单源时也不做，保持原行为） */
-        expectedTotal: Long = -1L,
-        /** P0-2：内容指纹（`If-Range`）。仅在本片已有字节、需要续传时才会真的发出去 */
-        ifRange: String? = null,
+        segment: DownloadSegment,
+        channel: FileChannel,
+        table: SegmentTable,
+        /** 跨源长度校验用的总长；<= 0 表示不校验 */
+        expectedTotal: Long,
+        ifRange: String?,
+        linkSampler: ByteRateSampler,
+        bestConnectionRate: AtomicLong,
+        activeWorkers: AtomicInteger,
     ) {
-        val part = partFile(target, index)
-        val offsetFile = offsetFile(target, index)
-        val expected = rangeEnd - rangeStart + 1
-
-        // 恢复已下载偏移（不超过预期长度，避免损坏数据被误用）
-        var offset = if (part.exists()) {
-            (offsetFile.takeIf { it.exists() }?.readText()?.toLongOrNull() ?: part.length())
-                .coerceIn(0L, part.length())
-                .coerceAtMost(expected)
-        } else 0L
-        if (offset >= expected) {
-            tracker.update(index, expected)
-            return
-        }
-
-        val connStart = rangeStart + offset
-        // If-Range 只在**真的要续**（本片已有字节）时发：新片没有任何旧字节可被污染，
-        // 而「内容没变但服务端每次给不同 ETag」的怪服务器上，多发一个头只会让新任务也无谓失败。
-        // 跨会话换文件这种情况由启动前的指纹比对（reconcileFingerprint）负责拦住。
-        val chunkIfRange = ifRange.takeIf { offset > 0 }
-        // Range 必须在建立连接时给：带 Cookie 的连接在跟随重定向阶段就已经 established，
-        // 之后再 setRequestProperty 会抛 "Already connected"（分块下载全灭）
-        val connection = newConnection(url, auth, range = "bytes=$connStart-$rangeEnd", ifRange = chunkIfRange)
-        taskConnections["$taskId#$index"] = connection
-        // P2-3：connect()/responseCode()/FileChannel.open() 都可能抛异常，必须和后面的
-        // 读写共用同一个 try/finally，否则这些早期失败会泄漏连接与 taskConnections 映射项。
-        var channel: FileChannel? = null
-        try {
-        connection.connect()
-        val code = connection.responseCode
-        if (code == HttpURLConnection.HTTP_OK) {
-            runCatching { connection.disconnect() }
-            // 带着 If-Range 却拿到整份内容：服务端明确判定实体已经变了。换源没有意义
-            // （另一个源只会给我们另一份新内容），整轮作废由外层从头重下。
-            if (chunkIfRange != null) {
-                throw ContentReplacedException(
-                    "分块 $index 收到 HTTP 200：If-Range 判定远端内容已变化",
-                )
-            }
-            throw IllegalStateException("分块 $index 请求失败: HTTP $code")
-        }
-        if (code != HttpURLConnection.HTTP_PARTIAL) {
-            runCatching { connection.disconnect() }
-            throw IllegalStateException("分块 $index 请求失败: HTTP $code")
-        }
-        // 206 只说明「接受了 Range」，不说明「从我要的位置开始」：忽略 If-Range / 截断区间的
-        // 服务器照样回 206，把那批字节写进本分片就是静默错位。宁可失败，也不交付坏文件。
-        val reportedStart = contentRangeStart(connection)
-        if (reportedStart != null && reportedStart != connStart) {
-            runCatching { connection.disconnect() }
-            throw IllegalStateException(
-                "分块 $index 响应起点 $reportedStart 与请求的 $connStart 不符",
-            )
-        }
-        // C2：不同账号取到的直链可能指向不同副本（免转存 / 转存走不同 CDN、账号空间里
-        // 同名不同内容）。上游完全不校验，直接按主源的 total 拼分片，结果是字节错位合并。
-        // 这里用 206 的 `Content-Range: bytes a-b/total` 做最低限度防线：长度不一致就
-        // 弃用这个源（外层换下一个）；服务器不给 total（`/*`）时才放行。
-        if (expectedTotal > 0L) {
-            val reportedTotal = connection.getHeaderField("Content-Range")
-                ?.substringAfterLast('/')
-                ?.toLongOrNull()
-            if (reportedTotal != null && reportedTotal > 0L && reportedTotal != expectedTotal) {
-                runCatching { connection.disconnect() }
-                throw IllegalStateException(
-                    "备选直链长度与任务不一致: $reportedTotal != $expectedTotal",
-                )
-            }
-        }
-
-        channel = FileChannel.open(
-            part.toPath(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
+        if (segment.finished) return
+        val connStart = segment.cursor
+        val requestEnd = segment.end
+        // If-Range 只在**本段已有字节**时发：新段没有旧字节可被污染，
+        // 而「内容没变但每次 ETag 都不同」的怪服务器上，多发一个头只会让新任务无谓失败。
+        val chunkIfRange = ifRange.takeIf { connStart > segment.start }
+        // Range 必须在建连时给：带 Cookie 的连接在跟随重定向阶段就已经 established
+        val connection = newConnection(
+            url, auth, range = "bytes=$connStart-$requestEnd", ifRange = chunkIfRange,
         )
-        taskFiles.computeIfAbsent(taskId) { CopyOnWriteArrayList() }.add(channel)
-        val ch = channel // 非 null 局部引用，供读写使用（channel 变量本身因 finally 需要而声明为可空）
-        ch.truncate(offset)
-        ch.position(offset)
-        tracker.update(index, offset)
+        val key = "$taskId#$workerId"
+        taskConnections[key] = connection
 
-        var written = offset
-        var lastFlush = 0L
+        val detector = SlowConnectionDetector()
+        val startedAt = System.currentTimeMillis()
+        var bytesThisConnection = 0L
+        var writeNanos = 0L
+        var lastShedCheck = startedAt
         var lastEmit = 0L
-        val selfJob = currentCoroutineContext()[Job]
-        limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
+
+        try {
+            connection.connect()
+            val code = connection.responseCode
+            if (code == HttpURLConnection.HTTP_OK) {
+                runCatching { connection.disconnect() }
+                // 带着 If-Range 却拿到整份内容：服务端明确判定实体已经变了
+                if (chunkIfRange != null) {
+                    throw ContentReplacedException(
+                        "段 ${segment.start} 收到 HTTP 200：If-Range 判定远端内容已变化",
+                    )
+                }
+                throw IllegalStateException("段请求失败: HTTP $code")
+            }
+            if (code != HttpURLConnection.HTTP_PARTIAL) {
+                runCatching { connection.disconnect() }
+                throw IllegalStateException("段请求失败: HTTP $code")
+            }
+            // 206 只说明「接受了 Range」，不说明「从我要的位置开始」：
+            // 忽略 If-Range / 截断区间的服务器照样回 206，把那批字节写进去就是静默错位
+            val reportedStart = contentRangeStart(connection)
+            if (reportedStart != null && reportedStart != connStart) {
+                runCatching { connection.disconnect() }
+                throw IllegalStateException("段起始 $reportedStart 与请求的 $connStart 不符")
+            }
+            if (expectedTotal > 0L) {
+                val reportedTotal = connection.getHeaderField("Content-Range")
+                    ?.substringAfterLast('/')
+                    ?.toLongOrNull()
+                if (reportedTotal != null && reportedTotal > 0L && reportedTotal != expectedTotal) {
+                    runCatching { connection.disconnect() }
+                    throw IllegalStateException(
+                        "备选直链长度与任务不一致: $reportedTotal != $expectedTotal",
+                    )
+                }
+            }
+
+            val selfJob = currentCoroutineContext()[Job]
+            limited(connection.inputStream) { selfJob?.isActive != false }.use { input ->
                 val buffer = ByteBuffer.allocate(AppConstants.CHUNK_BUFFER_SIZE)
                 val array = buffer.array()
                 while (true) {
                     currentCoroutineContext().ensureActive()
+                    // 段被切走 / 已写完：立刻收手，剩下的交给新段重新请求
+                    if (segment.finished) break
                     val n = input.read(array, 0, array.size)
                     if (n < 0) break
-                    if (written + n > expected) {
-                        throw IllegalStateException("分块 $index 数据超出预期长度")
-                    }
+
+                    val capacity = segment.end - segment.cursor + 1
+                    if (capacity <= 0L) break
+                    val toWrite = minOf(n.toLong(), capacity).toInt()
+
+                    val writeStartedAt = System.nanoTime()
                     buffer.clear()
-                    buffer.limit(n)
-                    while (buffer.hasRemaining()) ch.write(buffer)
-                    written += n
-                    tracker.update(index, written)
-                    val now = System.currentTimeMillis()
-                    if (now - lastFlush >= AppConstants.OFFSET_FLUSH_MS) {
-                        offsetFile.writeText(written.toString())
-                        lastFlush = now
+                    buffer.limit(toWrite)
+                    var written = 0
+                    while (buffer.hasRemaining()) {
+                        // 绝对定位写：多个 worker 写同一个文件互不干扰，也不动 channel 的 position
+                        val w = channel.write(buffer, segment.cursor)
+                        if (w <= 0) throw IllegalStateException("写入磁盘失败")
+                        segment.cursor += w
+                        table.addBytes(w.toLong())
+                        written += w
                     }
-                    // 分块内部也要持续上报进度，否则大文件只有整块下载完才刷新一次 UI
+                    writeNanos += System.nanoTime() - writeStartedAt
+                    bytesThisConnection += written
+
+                    val now = System.currentTimeMillis()
                     if (now - lastEmit >= AppConstants.IO_POLL_MS) {
-                        emitProgress(taskId, tracker.totalDone(), tracker.sampleSpeed(now))
+                        emitProgress(taskId, table.totalDone(), linkSampler.sample(table.totalDone(), now))
                         lastEmit = now
+                    }
+                    if (now - lastShedCheck >= SegmentTuning.SHED_CHECK_INTERVAL_MS) {
+                        lastShedCheck = now
+                        val elapsed = (now - startedAt).coerceAtLeast(1L)
+                        val rate = bytesThisConnection * 1000L / elapsed
+                        // 只把「跑够宽限期」的连接算进单连接上限，否则首包延迟会压出一个假基准
+                        if (elapsed >= 2_000L && rate > 0L) {
+                            bestConnectionRate.accumulateAndGet(rate) { a, b -> maxOf(a, b) }
+                        }
+                        val sample = SlowConnectionDetector.Sample(
+                            elapsedMs = elapsed,
+                            bytesReceived = bytesThisConnection,
+                            remainingBytes = segment.remaining,
+                            linkBytesPerSec = linkSampler.sample(table.totalDone(), now),
+                            activeConnections = activeWorkers.get(),
+                            bestConnectionBytesPerSec = bestConnectionRate.get(),
+                            writeWaitRatio = writeNanos.toDouble() / (elapsed * 1_000_000.0),
+                            shedCount = segment.shedCount,
+                        )
+                        if (detector.shouldShed(sample)) throw SlowConnectionShed()
                     }
                 }
             }
-            if (written != expected) {
-                AppLogger.warn(
-                    "DownloadEngine",
-                    "分块 $index 长度不符 offset=$offset expected=$expected written=$written " +
-                        "code=$code contentLength=${runCatching { connection.contentLengthLong }.getOrDefault(-1)}",
-                )
-                throw IllegalStateException("分块 $index 长度不符: $written != $expected")
-            }
-            offsetFile.writeText(expected.toString())
-        } catch (e: CancellationException) {
-            persistChunkOffset(taskId, offsetFile, index, tracker)
-            tracker.discard(index)
-            throw e
-        } catch (e: Exception) {
-            // 「暂停」是「先断开连接再取消协程」，阻塞在 read 上的协程拿到的是
-            // `IOException: stream is closed`，走不到上面那个 CancellationException 分支。
-            // 这里同样把已落盘字节写回，否则每次暂停都白丢最多 OFFSET_FLUSH_MS 那一段（P1-4）。
-            persistChunkOffset(taskId, offsetFile, index, tracker)
-            tracker.discard(index)
-            throw e
         } finally {
-            // channel 可能为 null：FileChannel.open 本身抛异常时也要能走到这里清理
-            channel?.let { c ->
-                closeQuietly(c, "DownloadEngine")
-                taskFiles[taskId]?.remove(c)
-            }
-            taskConnections.remove("$taskId#$index")
+            taskConnections.remove(key)
             ignoreFailure("DownloadEngine", "断开连接") { connection.disconnect() }
         }
     }
 
-    /**
-     * 把这一块已落盘的字节数写回 `.offset`，便于下次续传从这里接上。
-     *
-     * 只有「任务还在、且不是被取消」时才写：`removeTask` 会把任务从 map 里摘掉，
-     * 那时回写等于把刚清理过的文件重新创建出来，用户看到的就是「点 X 之后还留着
-     * `xxx.mp4.part0.offset`」（v6-P1-2）。
-     *
-     * 任务真的失败（HTTP 500、长度不符）时也照写：记录的本来就是「磁盘上确实有多少字节」，
-     * 下次续传还会用 `coerceIn(0, part.length())` 再校验一次，不存在把坏数据当进度的可能。
-     */
-    private fun persistChunkOffset(
-        taskId: String,
-        offsetFile: File,
-        index: Int,
-        tracker: DownloadProgressTracker,
-    ) {
-        val current = getTask(taskId) ?: return
-        if (current.status == DownloadStatus.CANCELLED) return
-        try {
-            offsetFile.writeText(tracker.chunkDone(index).toString())
-        } catch (writeError: Exception) {
-            AppLogger.warn("DownloadEngine", "写入分片进度失败: ${offsetFile.name}", writeError)
-        }
-    }
-
-    /**
-     * 合并分片：先写 `.merging` 再原子替换目标文件。
-     * P2-6：使用 [FileChannel.transferTo] 零拷贝合并。
-     */
-    private suspend fun mergeChunks(target: File, count: Int, totalSize: Long) {
-        val merging = File(target.parentFile, "${target.name}.merging")
-        merging.delete()
-        FileChannel.open(
-            merging.toPath(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.WRITE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-        ).use { output ->
-            for (i in 0 until count) {
-                currentCoroutineContext().ensureActive()
-                val part = partFile(target, i)
-                if (!part.exists()) throw IllegalStateException("缺少分片 $i，无法合并")
-                FileChannel.open(part.toPath(), StandardOpenOption.READ).use { input ->
-                    copyChannel(input, output)
-                }
-            }
-        }
-        if (merging.length() != totalSize) {
-            val actual = merging.length()
-            merging.delete()
-            throw IllegalStateException("合并后大小不符: $actual != $totalSize")
+    /** 收尾：校验长度后把 `.part` 改名成目标文件（没有合并步骤） */
+    private suspend fun finishPartial(partial: File, target: File, totalSize: Long) {
+        val actual = partial.length()
+        if (actual != totalSize) {
+            partial.delete()
+            throw IllegalStateException("下载结束但文件大小不符: $actual != $totalSize")
         }
         try {
             Files.move(
-                merging.toPath(),
+                partial.toPath(),
                 target.toPath(),
                 StandardCopyOption.REPLACE_EXISTING,
                 StandardCopyOption.ATOMIC_MOVE,
             )
         } catch (_: AtomicMoveNotSupportedException) {
-            // 某些文件系统（如跨卷挂载、部分网络盘）不支持原子移动，退回普通替换
-            Files.move(
-                merging.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
+            // 部分网络盘 / 跨卷挂载不支持原子移动，退回普通替换
+            Files.move(partial.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
-        // 清到 MAX_THREADS：旧计划可能留下更多 .partN，成功合并后不能继续占着磁盘
-        for (i in 0 until AppConstants.MAX_THREADS) {
-            partFile(target, i).delete()
-            offsetFile(target, i).delete()
-        }
-        clearChunkPlan(target)
-    }
-
-    /** 优先 transferTo；平台不支持时退回 1MB 缓冲拷贝 */
-    private fun copyChannel(input: FileChannel, output: FileChannel) {
-        var position = 0L
-        val size = input.size()
-        while (position < size) {
-            val transferred = input.transferTo(position, size - position, output)
-            if (transferred <= 0) {
-                input.position(position)
-                val buffer = ByteBuffer.allocate(AppConstants.MERGE_BUFFER_SIZE)
-                while (true) {
-                    buffer.clear()
-                    if (input.read(buffer) < 0) break
-                    buffer.flip()
-                    while (buffer.hasRemaining()) output.write(buffer)
-                }
-                return
-            }
-            position += transferred
-        }
+        cleanupLegacyChunkArtifacts(target)
     }
 
     // ------------------------------------------------------------------ 状态与进度
@@ -1924,16 +1977,16 @@ class DownloadEngine(
         )
     }
 
-    /** 清理任务对应的所有临时文件 */
+    /**
+     * 清理任务对应的所有临时文件。
+     *
+     * 包含单文件的 `.part`、段表快照 `.segments`、旧模型（≤1.0.4）的 `.partN` /
+     * `.partN.offset` / `.chunks.plan` / `.merging`，以及 HLS 合成的临时输出。
+     * 旧模型的残片必须一并清：升级前暂停的任务会在磁盘上留下它们，
+     * 不清的话「删任务后还留着 xxx.part3.offset」的老现象会复活（v6-P1-2）。
+     */
     private fun cleanupParts(target: File) {
-        for (i in 0 until AppConstants.MAX_THREADS) {
-            partFile(target, i).delete()
-            offsetFile(target, i).delete()
-        }
-        File(target.parentFile, "${target.name}.merging").delete()
-        // 分片计划清单；任务删除/取消后不能留着，否则同名任务会误用已清掉的旧分片
-        clearChunkPlan(target)
-        // HLS ffmpeg/fMP4 合成的临时输出；取消或删除任务时一并清理
+        cleanupDownloadArtifacts(target)
         File(target.parentFile, "${target.name}.tmp").delete()
     }
 

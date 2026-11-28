@@ -65,6 +65,9 @@ class DownloadEngineMultiSourceTest {
         engine = DownloadEngine(
             taskPersistenceEnabled = false,
             multiThreadThresholdBytes = 64L * 1024L,
+            // 段数按体积算（不是按线程数），生产粒度 4 MiB 会把这份 128 KiB 样本切成 1 段，
+            // 一条连接就下完了，备选源轮转根本不会被触发。这里注入 32 KiB 得到 4 段。
+            segmentBytes = 32L * 1024L,
         )
     }
 

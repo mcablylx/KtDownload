@@ -149,40 +149,33 @@ class DownloadFileSupportTest {
     }
 
     @Test
-    fun chunk_ranges_cover_uneven_size_without_gaps_or_overlap() {
-        val ranges = buildChunkRanges(totalSize = 1_000L, requestedThreads = 3)
+    fun segment_plan_covers_uneven_size_without_gaps_or_overlap() {
+        val segments = buildSegments(totalSize = 1_000L, count = 3)
 
-        assertEquals(3, ranges.size)
-        assertEquals(0L, ranges.first().first)
-        assertEquals(999L, ranges.last().last)
-        ranges.zipWithNext().forEach { (left, right) ->
-            assertEquals(left.last + 1L, right.first)
+        assertEquals(3, segments.size)
+        assertEquals(0L, segments.first().start)
+        assertEquals(999L, segments.last().end)
+        segments.zipWithNext().forEach { (left, right) ->
+            assertEquals(left.end + 1L, right.start)
         }
-        assertEquals(1_000L, ranges.sumOf { it.last - it.first + 1L })
+        assertEquals(1_000L, segments.sumOf { it.end - it.start + 1L })
     }
 
     @Test
-    fun chunk_count_is_capped_when_threads_exceed_file_size() {
-        val ranges = buildChunkRanges(totalSize = 3L, requestedThreads = 64)
-
-        assertEquals(2, ranges.size)
-        assertTrue(ranges.all { !it.isEmpty() })
-        assertEquals(3L, ranges.sumOf { it.last - it.first + 1L })
-    }
-
-    @Test
-    fun zero_size_has_no_chunks() {
-        assertTrue(buildChunkRanges(totalSize = 0L, requestedThreads = 8).isEmpty())
-        assertTrue(buildChunkRanges(totalSize = -1L, requestedThreads = 8).isEmpty())
+    fun segment_count_shrinks_for_tiny_files_instead_of_fragmenting() {
+        // 3 字节切成 64 段是纯粹的浪费：每段一次建连，且大多数段是空的
+        assertEquals(1, initialSegmentCount(totalSize = 3L, requestedThreads = 64))
+        assertEquals(0, initialSegmentCount(totalSize = 0L, requestedThreads = 8))
+        assertEquals(0, initialSegmentCount(totalSize = -1L, requestedThreads = 8))
     }
 
     @Test
     fun large_file_plan_does_not_overflow_int() {
         val totalSize = 5_000_000_000L
-        val ranges = buildChunkRanges(totalSize = totalSize, requestedThreads = 1_000)
+        val count = initialSegmentCount(totalSize = totalSize, requestedThreads = 1_000)
 
-        assertEquals(AppConstants.MAX_THREADS, ranges.size)
-        assertEquals(totalSize, ranges.sumOf { it.last - it.first + 1L })
+        assertEquals(AppConstants.MAX_THREADS, count)
+        assertEquals(totalSize, buildSegments(totalSize, count).sumOf { it.end - it.start + 1L })
     }
 
     @Test

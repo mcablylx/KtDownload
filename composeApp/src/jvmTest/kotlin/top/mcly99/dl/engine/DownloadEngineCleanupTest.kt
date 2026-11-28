@@ -103,7 +103,7 @@ class DownloadEngineCleanupTest {
         engine.shutdown()
 
         assertFalse(target.exists(), "shutdown 必须等清理协程跑完，deleteFile=true 不能落空（P1-05）")
-        assertFalse(File(target.parentFile, "${target.name}.part0").exists(), "残片也要清掉")
+        assertFalse(partialDownloadFile(target).exists(), "残片也要清掉")
     }
 
     @Test
@@ -119,9 +119,9 @@ class DownloadEngineCleanupTest {
 
         assertFalse(target.exists(), "取消后立即退出也要删掉未完成的目标文件")
         val leftovers = target.parentFile.listFiles().orEmpty().filter {
-            it.name.startsWith("${target.name}.part") || it.name.startsWith("${target.name}.offset")
+            it.name.startsWith("${target.name}.")
         }
-        assertTrue(leftovers.isEmpty(), "不应残留 .partN/.offset: ${leftovers.map { it.name }}")
+        assertTrue(leftovers.isEmpty(), "不应残留 .part/.segments 等中间文件: ${leftovers.map { it.name }}")
     }
 
     @Test

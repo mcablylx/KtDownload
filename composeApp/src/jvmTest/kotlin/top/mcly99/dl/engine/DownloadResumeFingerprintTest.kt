@@ -55,6 +55,7 @@ class DownloadResumeFingerprintTest {
         engine = DownloadEngine(
             taskPersistenceEnabled = false,
             multiThreadThresholdBytes = 64L * 1024L,
+            segmentBytes = 64L * 1024L,
         )
         executor = Executors.newFixedThreadPool(8)
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -80,8 +81,8 @@ class DownloadResumeFingerprintTest {
         engine.pauseDownload(id)
         awaitStatus(id, DownloadStatus.PAUSED)
         assertTrue(
-            (0 until 4).any { DownloadEngine.partFile(target, it).exists() },
-            "暂停后应当留下分片，否则这个用例根本没测到续传",
+            partialDownloadFile(target).exists(),
+            "暂停后应当留下半成品，否则这个用例根本没测到续传",
         )
 
         // 远端被换成同长度的另一份内容（网盘覆盖上传就是这个样子：大小不变，内容全变）
@@ -145,7 +146,7 @@ class DownloadResumeFingerprintTest {
         awaitStatus(id, DownloadStatus.PAUSED)
 
         // 内容没变：这一次必须真的**续**传（不能因为指纹逻辑每轮都从头下）
-        val beforeBytes = (0 until 4).sumOf { DownloadEngine.partFile(target, it).length() }
+        val beforeBytes = partialDownloadFile(target).length()
         assertTrue(beforeBytes > 0)
         seenIfRange.clear()
 

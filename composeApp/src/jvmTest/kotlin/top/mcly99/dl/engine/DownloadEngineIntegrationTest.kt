@@ -315,6 +315,8 @@ class DownloadEngineIntegrationTest {
         engine = DownloadEngine(
             taskPersistenceEnabled = false,
             multiThreadThresholdBytes = 64L * 1024L,
+            // 样本只有几百 KB，按 64 KiB 一段才能在测试里走到「多段并行 / 切分 / 续传」
+            segmentBytes = 64L * 1024L,
         )
     }
 
@@ -337,7 +339,7 @@ class DownloadEngineIntegrationTest {
     }
 
     @Test
-    fun large_file_uses_range_chunks_and_merges() {
+    fun large_file_is_split_into_range_segments_and_written_in_place() {
         val target = tempDir.resolve("large.bin")
         val task = downloadAndWait("/large", target, threads = 4)
 
@@ -345,8 +347,11 @@ class DownloadEngineIntegrationTest {
         assertContentEquals(largeData, target.readBytes())
         assertTrue(
             rangeAttempts.get() >= 5,
-            "应包含 1 次探测 + 4 个分块请求，实际 ${rangeAttempts.get()}",
+            "应包含探测请求 + 4 个分段请求，实际 ${rangeAttempts.get()}",
         )
+        // 没有合并步骤：中间文件必须已经被改名成目标文件，且不留快照
+        assertFalse(partialDownloadFile(target).exists(), "完成时不应留下 .part")
+        assertFalse(segmentPlanFile(target).exists(), "完成时不应留下段表快照")
     }
 
     @Test
@@ -457,14 +462,13 @@ class DownloadEngineIntegrationTest {
     }
 
     /**
-     * 暂停要把每块「已落盘多少字节」写回 `.offset`。
+     * 暂停要把「哪些区间还没下完、各自写到哪」落到段表快照。
      *
      * 暂停是「先断连接再取消」，停在 `read()` 上的协程抛的是 `IOException` 而不是
-     * `CancellationException`，所以收尾写盘必须两个分支都做 —— 只写取消分支的话，
-     * 每次暂停都白丢最近一个 `OFFSET_FLUSH_MS` 窗口的进度。
+     * `CancellationException`；两条收尾路径都不能把快照写坏 —— 写坏了下次续传就是错位。
      */
     @Test
-    fun pausing_keeps_the_progress_of_each_chunk_on_disk() {
+    fun pausing_persists_the_segment_cursors_on_disk() {
         val target = tempDir.resolve("pause-offset.bin")
         val id = engine.addTask(
             url = "http://127.0.0.1:${server.address.port}/slowrange",
@@ -477,20 +481,29 @@ class DownloadEngineIntegrationTest {
             }
         }
 
+        // 必须在下载跑完之前暂停（1 MB 的样本只够跑一秒左右，跑完快照就会被正常删除）
         engine.pauseDownload(id)
         runBlocking {
             engine.taskState.awaitElement(TestTimeouts.MEDIUM, { "任务 $id 未进入暂停态" }) {
                 it.id == id && it.status == DownloadStatus.PAUSED
             }
+            // 暂停的收尾会把段表落一次；等它出现，验证「暂停不丢进度」这条承诺
+            awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = { "暂停后段表快照未落盘" }) {
+                segmentPlanFile(target).exists()
+            }
         }
 
-        val offsets = tempDir
-            .listFiles { file -> file.name.startsWith("pause-offset.bin.part") && file.name.endsWith(".offset") }
-            .orEmpty()
-        assertTrue(offsets.isNotEmpty(), "暂停后应把每块的落盘进度写回 .offset")
-        val recorded = offsets.mapNotNull { it.readText().trim().toLongOrNull() }
-        assertEquals(offsets.size, recorded.size, "每个 .offset 都应是数字：${offsets.map { it.name }}")
-        assertTrue(recorded.any { it > 0 }, "至少要有一块记下了正数进度，否则这一轮白下")
+        val plan = segmentPlanFile(target)
+        assertTrue(plan.exists(), "暂停后应留下段表快照")
+        val raw = runCatching { plan.readText() }.getOrElse { "<读取失败: ${it.message}>" }
+        val rows = raw.lines().drop(2).filter { it.isNotBlank() }
+        assertTrue(rows.isNotEmpty(), "快照里应有未完成段，实际内容：\n$raw")
+        val advanced = rows.count { line ->
+            val parts = line.split('-')
+            parts.size == 3 &&
+                (parts[2].toLongOrNull() ?: 0L) > (parts[0].toLongOrNull() ?: 0L)
+        }
+        assertTrue(advanced > 0, "至少要有一段记下了正数游标，否则这一轮白下: $rows")
     }
 
     /** 调用方已知大小时，任务入队就应带上，UI 不必等探测 */
@@ -644,17 +657,24 @@ class DownloadEngineIntegrationTest {
     }
 
     @Test
-    fun removing_a_running_task_leaves_no_part_or_offset_files() {
+    fun removing_a_running_task_leaves_no_partial_files() {
         val target = tempDir.resolve("removing.bin")
         val id = engine.addTask(
             url = "http://127.0.0.1:${server.address.port}/slowrange",
             savePath = target.toPath(),
             threads = 2,
         )
-        // 先等分块真的把 `.offset` 写出来（OFFSET_FLUSH_MS = 1s），否则测不到「删完又被回写」这个竞态
+        // 等到真的开始写数据，再删任务，才覆盖得到「删完又被回写」这个竞态。
+        // 段表每 500 ms 落一次，而 1 MB 的样本可能一秒内就跑完（快照会被正常删掉），
+        // 所以这次等待超时不算失败。
         runBlocking {
-            awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = { "分块未写出 .offset 文件" }) {
-                tempDir.listFiles()?.any { it.name.endsWith(".offset") } == true
+            engine.taskState.awaitElement(TestTimeouts.SLOW, { "任务 $id 未开始写入数据" }) {
+                it.id == id && it.downloadedSize > 0
+            }
+            runCatching {
+                awaitUntilSuspend(TestTimeouts.MEDIUM, intervalMs = 50, describe = { "段表快照未落盘" }) {
+                    segmentPlanFile(target).exists()
+                }
             }
         }
 
