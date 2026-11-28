@@ -255,7 +255,7 @@ bash package-macos.sh
 
 预置文件缺失或损坏时，脚本会自动回退到原来的联网下载/源码编译路径（`--force` 可强制走源码编译）。因此网络良好的环境行为与之前完全一致。
 
-> Windows / Linux 目前仍需联网获取 FFmpeg 与 libvlc，仅 macOS 提供离线预置包。FFmpeg 二进制由 `scripts/fetch-ffmpeg.ps1` 强制做 SHA-256 校验；**联网下载的 libvlc 归档默认没有内置期望 SHA**，`verifyVlcArchive` 会在打包前明确告警「本次未校验」，可用 `-PvlcArchiveSha256=<sha256>` 注入（或把归档与其 SHA 补进 `third-party/binaries/`）。升级任一二进制版本时，必须同步更新 `third-party/binaries/SOURCE.txt`、`build.gradle.kts` 的版本/SHA 常量与 `fetch-ffmpeg*` 脚本（P2-25）。
+> Windows / Linux 目前仍需联网获取 FFmpeg 与 libvlc，仅 macOS 提供离线预置包。FFmpeg 二进制由 `scripts/fetch-ffmpeg.ps1` 强制做 SHA-256 校验；libvlc 归档的 SHA-256 在三个平台**都有钉死值**（`build.gradle.kts` 的 `pinnedVlcSha256`，与 `third-party/binaries/SOURCE.txt` 记录一致），`verifyVlcArchive` 在打包前必定校验，不匹配直接让构建失败；需要临时换版本或上游重新打包时，用 `-PvlcArchiveSha256=<sha256>` 覆盖。升级任一二进制版本时，必须同步更新 `third-party/binaries/SOURCE.txt`、`build.gradle.kts` 的版本/SHA 常量与 `fetch-ffmpeg*` 脚本（P2-25）。
 
 ---
 

@@ -69,23 +69,22 @@ macOS（唯一随仓库分发的预置归档；SHA 同时写在 build.gradle.kts
       SHA-256 = ec49289086ee9334cd33f83c24bd51b6d3907761dc3f13e379927916ecb5aadb
       来源     = 本仓库 scripts/fetch-ffmpeg-macos.sh 编译并 lipo 合并（2026-11-21）
 
-Windows / Linux（本仓库不预置，走联网下载；没有内置期望 SHA）
-  vlc-3.0.21.zip       SHA-256 = <未提供>  来源 = videolan 3.0.21 win64
-  upx-4.2.4.zip        SHA-256 = <未提供>  来源 = UPX 4.2.4 win64
-  vlc-3.0.20-2.jar     SHA-256 = <未提供>  来源 = Maven Central ir.mahozad:vlc-plugins-linux:3.0.20-2
+Windows / Linux（本仓库不预置归档，走联网下载；libvlc 的 SHA 已钉死并强制校验）
+  vlc-3.0.21.zip       SHA-256 = a0b7ec02b50adf6417eed014fb8df50af39690505a4225b85b3dc2ed17d14843
+                       来源 = videolan 3.0.21 win64（官方 .sha256 文件，与本机实测一致）
+  upx-4.2.4.zip        SHA-256 = <未提供>  来源 = UPX 4.2.4 win64（未纳入校验范围）
+  vlc-3.0.20-2.jar     SHA-256 = 3de56c7136d0beda0f87dcafbbc075eb64a6b2e65c70ffc7371e4472d9149abe
+                       来源 = Maven Central ir.mahozad:vlc-plugins-linux:3.0.20-2
                        ↑ 不是 3.0.21：vlc-setup 0.1.0 的 LinuxTasksConfigure.kt 把版本硬编成
                          "3.0.20-2"（作者留了 FIXME），落盘名与 vlcBundleVersion 无关
-  upx-4.2.4.tar.xz     SHA-256 = <未提供>  来源 = UPX 4.2.4 linux
+  upx-4.2.4.tar.xz     SHA-256 = <未提供>  来源 = UPX 4.2.4 linux（未纳入校验范围）
   ffmpeg-n*-win64-lgpl-*.zip
       SHA-256 = 见 scripts/fetch-ffmpeg.ps1 的 $ExpectedSha256（该脚本已强制校验）
 
-联网下载的 libvlc 归档默认没有期望 SHA，composeApp/build.gradle.kts 的
-verifyVlcArchive 会在打包前明确告警「本次未校验」，而不是静默跳过。
-拿到官方归档后请自行计算并注入：
-
+三平台 libvlc 上游归档的 SHA-256 都已钉死在 composeApp/build.gradle.kts 的
+pinnedVlcSha256，verifyVlcArchive 在打包前必定校验，不再出现「本次未校验」。
+换版本或上游重新打包时用 -PvlcArchiveSha256=<sha256> 临时覆盖，不要改死值：
     ./gradlew -PvlcArchiveSha256=<sha256> :composeApp:packageReleaseDistributionForCurrentOS
-
-或把归档与其 SHA 一并补进本目录和本清单，让离线预置路径也覆盖该平台。
 
 升级任一二进制时必须同步更新：本文件、build.gradle.kts 的
 vlcBundleVersion / upxBundleVersion / bundledVlcSha256、fetch-ffmpeg* 脚本里的

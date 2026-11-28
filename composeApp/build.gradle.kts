@@ -360,20 +360,25 @@ fun cachedVlcArchive(): File? {
 // 在 vlcDownload 之前把它还原到 gradle 缓存，于是下面的 onlyIf 会判定「已存在」
 // 而跳过联网下载。校验 SHA-256，防止归档损坏或被人替换。
 val bundledVlcArchive = rootProject.layout.projectDirectory.file("third-party/binaries/$vlcArchiveName")
-// 仅 macOS 的预置归档随仓库分发；Windows/Linux 目前仍走联网下载（见 README）。
-// 对应 SHA-256 记录在 third-party/binaries/SOURCE.txt。
-val bundledVlcSha256 = when (vlcArchiveName) {
-    "vlc-$vlcBundleVersion.dmg" -> "50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0"
-    else -> null
+// 三平台上游归档的 SHA-256 一律钉死（与 third-party/binaries/SOURCE.txt 记录一致）。
+// 取值来自上游官方校验文件，不是本机自己算的：
+//   Windows  https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.zip.sha256
+//   macOS    videolan 3.0.21 universal dmg（与本仓库预置那份实测逐字节一致）
+//   Linux    https://repo1.maven.org/maven2/ir/mahozad/vlc-plugins-linux/3.0.20-2/…jar.sha256
+//            （Linux 实际版本是 3.0.20-2，见上面 vlcArchiveName 的说明）
+// 之前只给 macOS 配值、Windows/Linux 留 null，那两个平台打包时只会告警「本次未校验」，
+// 等于每次装包都不校验 libvlc；现在三者都是真校验。
+val pinnedVlcSha256 = when {
+    osName.contains("win") -> "a0b7ec02b50adf6417eed014fb8df50af39690505a4225b85b3dc2ed17d14843"
+    osName.contains("mac") -> "50380e56f81d630e3531426a265abf8b3dee6c0822bb7c9e30b532c7d69a65c0"
+    else -> "3de56c7136d0beda0f87dcafbbc075eb64a6b2e65c70ffc7371e4472d9149abe"
 }
 
-// P2-25：Windows / Linux 的归档是联网下载的，仓库里没有对应文件，也就没有内置 SHA。
-// 不硬编一个未知值（那会让所有 Windows/Linux 打包必然校验失败），而是开放一条
-// 数据驱动通道：-PvlcArchiveSha256=<sha256> 注入期望值；没注入时下面的校验任务
-// 会明确告警「本次未校验」，而不是像以前那样静默跳过。
-// macOS 仍用仓库预置包的内置值，行为不变。
+// P2-25：期望 SHA 的取值顺序是「命令行注入 > 内置钉死值」。
+// -PvlcArchiveSha256=<sha256> 保留给「试新版本 / 上游重新打包」的场景；
+// 显式传空值（-PvlcArchiveSha256=）会退回「未知期望」，此时校验任务只告警不失败。
 val vlcExpectedSha256: String? = providers.gradleProperty("vlcArchiveSha256")
-    .orElse(bundledVlcSha256.orEmpty())
+    .orElse(pinnedVlcSha256)
     .orNull
     ?.takeIf { it.isNotBlank() }
 val restoreVlcFromRepo by tasks.registering {

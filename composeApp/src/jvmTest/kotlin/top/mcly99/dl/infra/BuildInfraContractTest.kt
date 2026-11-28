@@ -93,12 +93,16 @@ class BuildInfraContractTest {
     fun vlc_sha_is_injectable_and_no_unknown_sha_is_hardcoded() {
         val build = repoFile("composeApp/build.gradle.kts").readText()
         assertTrue(build.contains("providers.gradleProperty(\"vlcArchiveSha256\")"),
-            "Windows/Linux 归档必须支持 -PvlcArchiveSha256 注入")
+            "归档必须支持 -PvlcArchiveSha256 覆盖（试新版本 / 上游重新打包）")
         assertTrue(build.contains("val vlcExpectedSha256"), "缺少统一的期望 SHA 变量")
         assertTrue(build.contains("verifyVlcArchive"), "打包前必须有归档校验闸门")
-        assertTrue(build.contains("本次未校验"), "无 SHA 时必须明确告警，不能静默跳过")
-        // 只有 macOS dmg 有内置值，不能给 Windows/Linux 编一个未知 SHA
-        assertTrue(build.contains("else -> null"), "bundledVlcSha256 的非 macOS 分支应保持 null")
+        assertTrue(build.contains("本次未校验"), "无期望 SHA 时必须明确告警，不能静默跳过")
+        // 三个平台都必须有真 SHA：留 null 等于该平台每次打包都只告警「本次未校验」，
+        // 等于安装包里的 libvlc 从来没被校验过（Windows/Linux 就长期是这种状态）。
+        assertTrue(build.contains("val pinnedVlcSha256"), "缺少三平台统一的上游 SHA 常量")
+        assertFalse(build.contains("else -> null"), "不允许再有平台落到「无期望 SHA」分支")
+        assertEquals(3, Regex("\"[0-9a-f]{64}\"").findAll(build).count(),
+            "Windows / macOS / Linux 三个 SHA 都要写全 64 位 hex")
         // 回归防线（v1.0.4 Release 的 ubuntu job 就死在这里）：归档路径不能声明成
         // inputs.file —— Linux 上插件的落盘名与 vlcBundleVersion 无关（硬编 3.0.20-2），
         // 声明成输入会在配置校验阶段直接失败，且 optional() 也拦不住。
